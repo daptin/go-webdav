@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/emersion/go-ical"
-	"github.com/emersion/go-webdav"
-	"github.com/emersion/go-webdav/internal"
+	"github.com/daptin/go-webdav"
+	"github.com/daptin/go-webdav/internal"
 )
 
 var CapabilityCalendar = webdav.Capability("calendar-access")

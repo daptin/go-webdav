@@ -132,14 +132,11 @@ func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error
 	if err != nil {
 		return false, err
 	}
-	if rset != nil {
-		// TODO we can only set inclusive to true or false, but really the
-		// start time is inclusive while the end time is not :/
-		return len(rset.Between(start, end, true)) > 0, nil
-	}
-
 	// TODO handle more than just events
 	if comp.Name != ical.CompEvent {
+		if rset != nil {
+			return len(rset.Between(start, end, true)) > 0, nil
+		}
 		return false, nil
 	}
 	event := ical.Event{comp}
@@ -151,6 +148,20 @@ func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error
 	eventEnd, err := event.DateTimeEnd(end.Location())
 	if err != nil {
 		return false, err
+	}
+	if rset != nil {
+		// RecurrenceSet contains starts, while a VEVENT time range matches
+		// any occurrence that overlaps [start, end). The latest start at or
+		// before start is the only earlier occurrence we need to inspect.
+		previous := rset.Before(start, true)
+		if !previous.IsZero() {
+			duration := eventEnd.Sub(eventStart)
+			if duration > 0 && previous.Add(duration).After(start) || duration == 0 && previous.Equal(start) {
+				return true, nil
+			}
+		}
+		next := rset.After(start, false)
+		return !next.IsZero() && (end.IsZero() || next.Before(end)), nil
 	}
 
 	// Event starts in time range

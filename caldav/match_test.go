@@ -309,3 +309,78 @@ END:VCALENDAR`)
 		})
 	}
 }
+
+func TestRecurringEventOverlap(t *testing.T) {
+	for _, tc := range []struct {
+		name, start, end, rule, queryStart, queryEnd string
+		want                                         bool
+	}{
+		{"issue 299", "20261001T000000Z", "20261004T000000Z", "FREQ=WEEKLY;COUNT=4", "20261002T000000Z", "20261003T000000Z", true},
+		{"later occurrence", "20261001T000000Z", "20261004T000000Z", "FREQ=WEEKLY;COUNT=4", "20261009T000000Z", "20261010T000000Z", true},
+		{"month boundary", "20261030T000000Z", "20261102T000000Z", "FREQ=WEEKLY;COUNT=3", "20261101T000000Z", "20261102T000000Z", true},
+		{"end equals range start", "20261001T000000Z", "20261004T000000Z", "FREQ=WEEKLY;COUNT=4", "20261004T000000Z", "20261005T000000Z", false},
+		{"start equals range end", "20261001T000000Z", "20261004T000000Z", "FREQ=WEEKLY;COUNT=4", "20260930T000000Z", "20261001T000000Z", false},
+		{"no occurrence", "20261001T000000Z", "20261004T000000Z", "FREQ=WEEKLY;COUNT=4", "20261101T000000Z", "20261102T000000Z", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Test//EN\nBEGIN:VEVENT\nUID:long-recurring\nDTSTAMP:20261005T000000Z\nDTSTART:" + tc.start + "\nDTEND:" + tc.end + "\nRRULE:" + tc.rule + "\nSUMMARY:Long event\nEND:VEVENT\nEND:VCALENDAR\n"
+			calendar, err := ical.NewDecoder(strings.NewReader(data)).Decode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			object := CalendarObject{Path: "/long.ics", ETag: `"original"`, Data: calendar}
+			query := &CalendarQuery{CompFilter: CompFilter{Name: ical.CompCalendar, Comps: []CompFilter{{Name: ical.CompEvent, Start: toDate(t, tc.queryStart), End: toDate(t, tc.queryEnd)}}}}
+			result, err := Filter(query, []CalendarObject{object})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (len(result) == 1) != tc.want {
+				t.Fatalf("matching objects = %d, want match %t", len(result), tc.want)
+			}
+			if tc.want && (result[0].ETag != object.ETag || result[0].Data != calendar) {
+				t.Fatal("filter changed the returned object")
+			}
+		})
+	}
+}
+
+func TestRecurringEventExcludedOccurrence(t *testing.T) {
+	data := "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Test//EN\nBEGIN:VEVENT\nUID:excluded\nDTSTAMP:20261005T000000Z\nDTSTART:20261001T000000Z\nDTEND:20261004T000000Z\nRRULE:FREQ=WEEKLY;COUNT=4\nEXDATE:20261008T000000Z\nEND:VEVENT\nEND:VCALENDAR\n"
+	calendar, err := ical.NewDecoder(strings.NewReader(data)).Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := &CalendarQuery{CompFilter: CompFilter{Name: ical.CompCalendar, Comps: []CompFilter{{Name: ical.CompEvent, Start: toDate(t, "20261009T000000Z"), End: toDate(t, "20261010T000000Z")}}}}
+	result, err := Filter(query, []CalendarObject{{Data: calendar}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("excluded occurrence matched: %d objects", len(result))
+	}
+}
+
+func TestRecurringInstantEventTimeRange(t *testing.T) {
+	data := "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Test//EN\nBEGIN:VEVENT\nUID:instant\nDTSTAMP:20261005T000000Z\nDTSTART:20261001T000000Z\nRRULE:FREQ=WEEKLY;COUNT=2\nEND:VEVENT\nEND:VCALENDAR\n"
+	calendar, err := ical.NewDecoder(strings.NewReader(data)).Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		start, end string
+		want       bool
+	}{
+		{"20261001T000000Z", "20261002T000000Z", true},
+		{"20260930T000000Z", "20261001T000000Z", false},
+		{"20261008T000000Z", "20261009T000000Z", true},
+	} {
+		query := &CalendarQuery{CompFilter: CompFilter{Name: ical.CompCalendar, Comps: []CompFilter{{Name: ical.CompEvent, Start: toDate(t, tc.start), End: toDate(t, tc.end)}}}}
+		result, err := Filter(query, []CalendarObject{{Data: calendar}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (len(result) == 1) != tc.want {
+			t.Fatalf("range %s to %s: matching objects = %d, want match %t", tc.start, tc.end, len(result), tc.want)
+		}
+	}
+}

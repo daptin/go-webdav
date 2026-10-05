@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/emersion/go-webdav/internal"
+	"github.com/daptin/go-webdav/internal"
 )
 
 // LocalFileSystem implements FileSystem for a local directory.
