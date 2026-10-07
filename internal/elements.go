@@ -461,7 +461,10 @@ type CurrentUserPrivilegeSet struct {
 
 // https://tools.ietf.org/html/rfc3744#section-5.4
 type Privilege struct {
-	XMLName xml.Name  `xml:"DAV: privilege"`
-	Read    *struct{} `xml:"DAV: read,omitempty"`
-	Write   *struct{} `xml:"DAV: write,omitempty"`
+	XMLName      xml.Name  `xml:"DAV: privilege"`
+	Read         *struct{} `xml:"DAV: read,omitempty"`
+	Write        *struct{} `xml:"DAV: write,omitempty"`
+	ReadFreeBusy *struct{} `xml:"urn:ietf:params:xml:ns:caldav read-free-busy,omitempty"`
+	Bind         *struct{} `xml:"DAV: bind,omitempty"`
+	Unbind       *struct{} `xml:"DAV: unbind,omitempty"`
 }

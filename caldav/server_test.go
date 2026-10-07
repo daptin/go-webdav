@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -186,7 +187,7 @@ func (t testBackend) CreateCalendar(ctx context.Context, calendar *Calendar) err
 	return nil
 }
 
-func (t testBackend) ListCalendars(ctx context.Context) ([]Calendar, error) {
+func (t testBackend) ListCalendars(ctx context.Context, _ string) ([]Calendar, error) {
 	return t.calendars, nil
 }
 
@@ -199,7 +200,7 @@ func (t testBackend) GetCalendar(ctx context.Context, path string) (*Calendar, e
 	return nil, fmt.Errorf("Calendar for path: %s not found", path)
 }
 
-func (t testBackend) CalendarHomeSetPath(ctx context.Context) (string, error) {
+func (t testBackend) CalendarHomeSetPath(ctx context.Context, _ string) (string, error) {
 	return "/user/calendars/", nil
 }
 
@@ -232,4 +233,42 @@ func (t testBackend) ListCalendarObjects(ctx context.Context, path string, req *
 
 func (t testBackend) QueryCalendarObjects(ctx context.Context, path string, query *CalendarQuery) ([]CalendarObject, error) {
 	return nil, nil
+}
+
+func (t testBackend) FreeBusy(context.Context, string, time.Time, time.Time, bool) (*ical.Calendar, error) {
+	calendar := ical.NewCalendar()
+	calendar.Props.SetText(ical.PropVersion, "2.0")
+	calendar.Props.SetText(ical.PropProductID, "-//Daptin//Test//EN")
+	busy := ical.NewComponent(ical.CompFreeBusy)
+	busy.Props.SetText(ical.PropUID, "test-freebusy")
+	busy.Props.SetDateTime(ical.PropDateTimeStamp, time.Now().UTC())
+	calendar.Children = append(calendar.Children, busy)
+	return calendar, nil
+}
+
+func TestFreeBusyReport(t *testing.T) {
+	handler := Handler{Backend: testBackend{calendars: []Calendar{{Path: "/user/calendars/team/"}}}}
+	request := httptest.NewRequest("REPORT", "/user/calendars/team/", strings.NewReader(
+		`<C:free-busy-query xmlns:C="urn:ietf:params:xml:ns:caldav"><C:time-range start="20261006T000000Z" end="20261007T000000Z"/></C:free-busy-query>`))
+	request.Header.Set("Content-Type", "application/xml")
+	request.Header.Set("Depth", "1")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "BEGIN:VFREEBUSY") {
+		t.Fatalf("free/busy status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestCalendarPrivilegesAreEffective(t *testing.T) {
+	calendar := Calendar{Path: "/user/calendars/team/", Read: true, ReadFreeBusy: true}
+	handler := Handler{Backend: testBackend{calendars: []Calendar{calendar}}}
+	request := httptest.NewRequest("PROPFIND", calendar.Path, strings.NewReader(
+		`<D:propfind xmlns:D="DAV:"><D:prop><D:current-user-privilege-set/></D:prop></D:propfind>`))
+	request.Header.Set("Content-Type", "application/xml")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusMultiStatus || !strings.Contains(body, "read-free-busy") || !strings.Contains(body, "read") || strings.Contains(body, ">write<") {
+		t.Fatalf("privilege status=%d body=%s", recorder.Code, body)
+	}
 }

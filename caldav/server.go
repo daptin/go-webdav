@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/emersion/go-ical"
 	"github.com/daptin/go-webdav"
 	"github.com/daptin/go-webdav/internal"
+	"github.com/emersion/go-ical"
 )
 
 // TODO if nothing more Caldav-specific needs to be added this should be merged with carddav.PutAddressObjectOptions
@@ -29,15 +29,16 @@ type PutCalendarObjectOptions struct {
 
 // Backend is a CalDAV server backend.
 type Backend interface {
-	CalendarHomeSetPath(ctx context.Context) (string, error)
+	CalendarHomeSetPath(ctx context.Context, requestedPath string) (string, error)
 
 	CreateCalendar(ctx context.Context, calendar *Calendar) error
-	ListCalendars(ctx context.Context) ([]Calendar, error)
+	ListCalendars(ctx context.Context, requestedPath string) ([]Calendar, error)
 	GetCalendar(ctx context.Context, path string) (*Calendar, error)
 
 	GetCalendarObject(ctx context.Context, path string, req *CalendarCompRequest) (*CalendarObject, error)
 	ListCalendarObjects(ctx context.Context, path string, req *CalendarCompRequest) ([]CalendarObject, error)
 	QueryCalendarObjects(ctx context.Context, path string, query *CalendarQuery) ([]CalendarObject, error)
+	FreeBusy(ctx context.Context, path string, start, end time.Time, includeChildren bool) (*ical.Calendar, error)
 	PutCalendarObject(ctx context.Context, path string, calendar *ical.Calendar, opts *PutCalendarObjectOptions) (*CalendarObject, error)
 	DeleteCalendarObject(ctx context.Context, path string) error
 
@@ -97,8 +98,37 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 		return h.handleQuery(r, w, report.Query)
 	} else if report.Multiget != nil {
 		return h.handleMultiget(r.Context(), w, report.Multiget)
+	} else if report.FreeBusy != nil {
+		if len(report.FreeBusy.TimeRanges) != 1 {
+			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: free-busy-query requires one time-range")
+		}
+		rangeValue := report.FreeBusy.TimeRanges[0]
+		start, end := time.Time(rangeValue.Start), time.Time(rangeValue.End)
+		if start.IsZero() || end.IsZero() || !start.Before(end) {
+			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: invalid free-busy time-range")
+		}
+		depth := internal.DepthZero
+		if header := r.Header.Get("Depth"); header != "" {
+			parsed, err := internal.ParseDepth(header)
+			if err != nil {
+				return internal.HTTPErrorf(http.StatusBadRequest, "caldav: invalid Depth header")
+			}
+			depth = parsed
+		}
+		calendar, err := h.Backend.FreeBusy(r.Context(), r.URL.Path, start, end, depth != internal.DepthZero)
+		if err != nil {
+			return err
+		}
+		var encoded bytes.Buffer
+		if err := ical.NewEncoder(&encoded).Encode(calendar); err != nil {
+			return err
+		}
+		w.Header().Set("Content-Type", ical.MIMEType)
+		w.WriteHeader(http.StatusOK)
+		_, err = w.Write(encoded.Bytes())
+		return err
 	}
-	return internal.HTTPErrorf(http.StatusBadRequest, "caldav: expected calendar-query or calendar-multiget element in REPORT request")
+	return internal.HTTPErrorf(http.StatusBadRequest, "caldav: unsupported REPORT request")
 }
 
 func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
@@ -316,9 +346,16 @@ func (b *backend) resourceTypeAtPath(reqPath string) resourceType {
 
 func (b *backend) Options(r *http.Request) (caps []string, allow []string, err error) {
 	caps = []string{"calendar-access"}
-
-	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendarObject {
-		return caps, []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL"}, nil
+	switch b.resourceTypeAtPath(r.URL.Path) {
+	case resourceTypeRoot, resourceTypeUserPrincipal:
+		return caps, []string{http.MethodOptions, "PROPFIND"}, nil
+	case resourceTypeCalendarHomeSet:
+		return caps, []string{http.MethodOptions, "PROPFIND", "MKCOL"}, nil
+	case resourceTypeCalendar:
+		return caps, []string{http.MethodOptions, "PROPFIND", "REPORT", http.MethodDelete}, nil
+	case resourceTypeCalendarObject:
+	default:
+		return nil, nil, internal.HTTPErrorf(http.StatusNotFound, "caldav: unknown resource path")
 	}
 
 	var dataReq CalendarCompRequest
@@ -380,24 +417,24 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		}
 		resps = append(resps, *resp)
 	case resourceTypeUserPrincipal:
-		principalPath, err := b.Backend.CurrentUserPrincipal(r.Context())
+		homeSetPath, err := b.Backend.CalendarHomeSetPath(r.Context(), r.URL.Path)
 		if err != nil {
 			return nil, err
 		}
-		if r.URL.Path == principalPath {
-			resp, err := b.propFindUserPrincipal(r.Context(), propfind)
+		if r.URL.Path == strings.TrimSuffix(homeSetPath, "calendars/") {
+			resp, err := b.propFindUserPrincipal(r.Context(), propfind, r.URL.Path)
 			if err != nil {
 				return nil, err
 			}
 			resps = append(resps, *resp)
 			if depth != internal.DepthZero {
-				resp, err := b.propFindHomeSet(r.Context(), propfind)
+				resp, err := b.propFindHomeSet(r.Context(), propfind, homeSetPath)
 				if err != nil {
 					return nil, err
 				}
 				resps = append(resps, *resp)
 				if depth == internal.DepthInfinity {
-					resps_, err := b.propFindAllCalendars(r.Context(), propfind, true)
+					resps_, err := b.propFindAllCalendars(r.Context(), propfind, true, homeSetPath)
 					if err != nil {
 						return nil, err
 					}
@@ -406,19 +443,19 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 			}
 		}
 	case resourceTypeCalendarHomeSet:
-		homeSetPath, err := b.Backend.CalendarHomeSetPath(r.Context())
+		homeSetPath, err := b.Backend.CalendarHomeSetPath(r.Context(), r.URL.Path)
 		if err != nil {
 			return nil, err
 		}
 		if r.URL.Path == homeSetPath {
-			resp, err := b.propFindHomeSet(r.Context(), propfind)
+			resp, err := b.propFindHomeSet(r.Context(), propfind, homeSetPath)
 			if err != nil {
 				return nil, err
 			}
 			resps = append(resps, *resp)
 			if depth != internal.DepthZero {
 				recurse := depth == internal.DepthInfinity
-				resps_, err := b.propFindAllCalendars(r.Context(), propfind, recurse)
+				resps_, err := b.propFindAllCalendars(r.Context(), propfind, recurse, homeSetPath)
 				if err != nil {
 					return nil, err
 				}
@@ -473,12 +510,12 @@ func (b *backend) propFindRoot(ctx context.Context, propfind *internal.PropFind)
 	return internal.NewPropFindResponse(principalPath, propfind, props)
 }
 
-func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.PropFind) (*internal.Response, error) {
+func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.PropFind, requestedPath string) (*internal.Response, error) {
 	principalPath, err := b.Backend.CurrentUserPrincipal(ctx)
 	if err != nil {
 		return nil, err
 	}
-	homeSetPath, err := b.Backend.CalendarHomeSetPath(ctx)
+	homeSetPath, err := b.Backend.CalendarHomeSetPath(ctx, requestedPath)
 	if err != nil {
 		return nil, err
 	}
@@ -492,15 +529,15 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 		}),
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, internal.PrincipalName)),
 	}
-	return internal.NewPropFindResponse(principalPath, propfind, props)
+	return internal.NewPropFindResponse(requestedPath, propfind, props)
 }
 
-func (b *backend) propFindHomeSet(ctx context.Context, propfind *internal.PropFind) (*internal.Response, error) {
+func (b *backend) propFindHomeSet(ctx context.Context, propfind *internal.PropFind, requestedPath string) (*internal.Response, error) {
 	principalPath, err := b.Backend.CurrentUserPrincipal(ctx)
 	if err != nil {
 		return nil, err
 	}
-	homeSetPath, err := b.Backend.CalendarHomeSetPath(ctx)
+	homeSetPath, err := b.Backend.CalendarHomeSetPath(ctx, requestedPath)
 	if err != nil {
 		return nil, err
 	}
@@ -546,13 +583,22 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 				Comp: components,
 			}, nil
 		},
-		// TODO: Gather UserPrivilege from backend to control read-and-write
-		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(&internal.CurrentUserPrivilegeSet{
-			Privilege: []internal.Privilege{{
-				Read:  &struct{}{},
-				Write: &struct{}{},
-			}},
-		}),
+		internal.CurrentUserPrivilegeSetName: func(*internal.RawXMLValue) (interface{}, error) {
+			privileges := make([]internal.Privilege, 0, 4)
+			if cal.Read {
+				privileges = append(privileges, internal.Privilege{Read: &struct{}{}})
+			}
+			if cal.ReadFreeBusy {
+				privileges = append(privileges, internal.Privilege{ReadFreeBusy: &struct{}{}})
+			}
+			if cal.Bind {
+				privileges = append(privileges, internal.Privilege{Bind: &struct{}{}})
+			}
+			if cal.Unbind {
+				privileges = append(privileges, internal.Privilege{Unbind: &struct{}{}})
+			}
+			return &internal.CurrentUserPrivilegeSet{Privilege: privileges}, nil
+		},
 	}
 
 	if cal.Name != "" {
@@ -576,8 +622,8 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 	return internal.NewPropFindResponse(cal.Path, propfind, props)
 }
 
-func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.PropFind, recurse bool) ([]internal.Response, error) {
-	abs, err := b.Backend.ListCalendars(ctx)
+func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.PropFind, recurse bool, requestedPath string) ([]internal.Response, error) {
+	abs, err := b.Backend.ListCalendars(ctx, requestedPath)
 	if err != nil {
 		return nil, err
 	}
