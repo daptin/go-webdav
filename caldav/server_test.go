@@ -272,3 +272,16 @@ func TestCalendarPrivilegesAreEffective(t *testing.T) {
 		t.Fatalf("privilege status=%d body=%s", recorder.Code, body)
 	}
 }
+
+func TestCalendarWriteContentPrivilege(t *testing.T) {
+	calendar := Calendar{Path: "/user/calendars/team/", Read: true, WriteContent: true}
+	handler := Handler{Backend: testBackend{calendars: []Calendar{calendar}}}
+	request := httptest.NewRequest("PROPFIND", calendar.Path, strings.NewReader(
+		`<D:propfind xmlns:D="DAV:"><D:prop><D:current-user-privilege-set/></D:prop></D:propfind>`))
+	request.Header.Set("Content-Type", "application/xml")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusMultiStatus || !strings.Contains(recorder.Body.String(), "write-content") {
+		t.Fatalf("write-content privilege status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}

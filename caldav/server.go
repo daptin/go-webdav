@@ -587,12 +587,15 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 			}, nil
 		},
 		internal.CurrentUserPrivilegeSetName: func(*internal.RawXMLValue) (interface{}, error) {
-			privileges := make([]internal.Privilege, 0, 4)
+			privileges := make([]internal.Privilege, 0, 5)
 			if cal.Read {
 				privileges = append(privileges, internal.Privilege{Read: &struct{}{}})
 			}
 			if cal.ReadFreeBusy {
 				privileges = append(privileges, internal.Privilege{ReadFreeBusy: &struct{}{}})
+			}
+			if cal.WriteContent {
+				privileges = append(privileges, internal.Privilege{WriteContent: &struct{}{}})
 			}
 			if cal.Bind {
 				privileges = append(privileges, internal.Privilege{Bind: &struct{}{}})

@@ -71,6 +71,7 @@ type Calendar struct {
 	SupportedComponentSet []string
 	Read                  bool
 	ReadFreeBusy          bool
+	WriteContent          bool
 	Bind                  bool
 	Unbind                bool
 }
