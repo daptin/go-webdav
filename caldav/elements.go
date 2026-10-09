@@ -24,7 +24,13 @@ var (
 
 	calendarName     = xml.Name{namespace, "calendar"}
 	calendarDataName = xml.Name{namespace, "calendar-data"}
+	scheduleTagName  = xml.Name{namespace, "schedule-tag"}
 )
+
+type scheduleTag struct {
+	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav schedule-tag"`
+	Value   string   `xml:",chardata"`
+}
 
 // https://tools.ietf.org/html/rfc4791#section-6.2.1
 type calendarHomeSet struct {

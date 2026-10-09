@@ -393,6 +393,9 @@ func (b *backend) HeadGet(w http.ResponseWriter, r *http.Request) error {
 	if co.ETag != "" {
 		w.Header().Set("ETag", internal.ETag(co.ETag).String())
 	}
+	if co.ScheduleTag != "" {
+		w.Header().Set("Schedule-Tag", strconv.Quote(co.ScheduleTag))
+	}
 	if !co.ModTime.IsZero() {
 		w.Header().Set("Last-Modified", co.ModTime.UTC().Format(http.TimeFormat))
 	}
@@ -685,6 +688,9 @@ func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal
 			ETag: internal.ETag(co.ETag),
 		})
 	}
+	if co.ScheduleTag != "" {
+		props[scheduleTagName] = internal.PropFindValue(&scheduleTag{Value: strconv.Quote(co.ScheduleTag)})
+	}
 
 	return internal.NewPropFindResponse(co.Path, propfind, props)
 }
@@ -743,6 +749,9 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 
 	if co.ETag != "" {
 		w.Header().Set("ETag", internal.ETag(co.ETag).String())
+	}
+	if co.ScheduleTag != "" {
+		w.Header().Set("Schedule-Tag", strconv.Quote(co.ScheduleTag))
 	}
 	if !co.ModTime.IsZero() {
 		w.Header().Set("Last-Modified", co.ModTime.UTC().Format(http.TimeFormat))

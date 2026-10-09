@@ -133,5 +133,6 @@ type CalendarObject struct {
 	ModTime       time.Time
 	ContentLength int64
 	ETag          string
+	ScheduleTag   string
 	Data          *ical.Calendar
 }
