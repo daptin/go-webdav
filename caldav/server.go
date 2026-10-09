@@ -352,7 +352,11 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 	case resourceTypeCalendarHomeSet:
 		return caps, []string{http.MethodOptions, "PROPFIND", "MKCOL"}, nil
 	case resourceTypeCalendar:
-		return caps, []string{http.MethodOptions, "PROPFIND", "REPORT", http.MethodDelete}, nil
+		allow := []string{http.MethodOptions, "PROPFIND", "REPORT", http.MethodDelete}
+		if _, ok := b.Backend.(CalendarPropertyBackend); ok {
+			allow = append(allow, "PROPPATCH")
+		}
+		return caps, allow, nil
 	case resourceTypeCalendarObject:
 	default:
 		return nil, nil, internal.HTTPErrorf(http.StatusNotFound, "caldav: unknown resource path")
@@ -366,14 +370,18 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 		return nil, nil, err
 	}
 
-	return caps, []string{
+	allow = []string{
 		http.MethodOptions,
 		http.MethodHead,
 		http.MethodGet,
 		http.MethodPut,
 		http.MethodDelete,
 		"PROPFIND",
-	}, nil
+	}
+	if _, ok := b.Backend.(CalendarObjectTransferBackend); ok {
+		allow = append(allow, "COPY", "MOVE")
+	}
+	return caps, allow, nil
 }
 
 func (b *backend) HeadGet(w http.ResponseWriter, r *http.Request) error {
@@ -607,9 +615,13 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 		},
 	}
 
-	if cal.Name != "" {
+	displayName := cal.DisplayName
+	if displayName == "" {
+		displayName = cal.Name
+	}
+	if displayName != "" {
 		props[internal.DisplayNameName] = internal.PropFindValue(&internal.DisplayName{
-			Name: cal.Name,
+			Name: displayName,
 		})
 	}
 	if cal.Description != "" {
@@ -717,7 +729,84 @@ func (b *backend) propFindAllCalendarObjects(ctx context.Context, propfind *inte
 }
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {
-	return nil, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: PropPatch not implemented")
+	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendar {
+		return nil, internal.HTTPErrorf(http.StatusMethodNotAllowed, "caldav: only calendar metadata can be changed")
+	}
+	backend, ok := b.Backend.(CalendarPropertyBackend)
+	if !ok {
+		return nil, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: PropPatch not implemented")
+	}
+	changes := make([]CalendarPropertyUpdate, 0)
+	failed := make(map[xml.Name]int)
+	seen := make(map[xml.Name]bool)
+	appendChange := func(raw internal.RawXMLValue, remove bool) error {
+		name, ok := raw.XMLName()
+		if !ok {
+			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: invalid property")
+		}
+		if seen[name] {
+			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: property repeated in PROPPATCH")
+		}
+		seen[name] = true
+		if name != internal.DisplayNameName && name != calendarDescriptionName {
+			failed[name] = http.StatusForbidden
+			return nil
+		}
+		change := CalendarPropertyUpdate{Name: name, Remove: remove}
+		if !remove {
+			var value struct {
+				Text  string `xml:",chardata"`
+				Inner string `xml:",innerxml"`
+			}
+			if err := raw.Decode(&value); err != nil {
+				return internal.HTTPErrorf(http.StatusBadRequest, "caldav: invalid property value: %v", err)
+			}
+			if strings.Contains(value.Inner, "<") {
+				return internal.HTTPErrorf(http.StatusBadRequest, "caldav: calendar property requires text")
+			}
+			change.Value = value.Text
+		}
+		changes = append(changes, change)
+		return nil
+	}
+	for _, group := range update.Remove {
+		for _, raw := range group.Prop.Raw {
+			if err := appendChange(raw, true); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, group := range update.Set {
+		for _, raw := range group.Prop.Raw {
+			if err := appendChange(raw, false); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil, internal.HTTPErrorf(http.StatusBadRequest, "caldav: empty PROPPATCH")
+	}
+	if len(failed) == 0 {
+		if err := backend.PatchCalendarProperties(r.Context(), r.URL.Path, changes); err != nil {
+			code := internal.HTTPErrorFromError(err).Code
+			for name := range seen {
+				failed[name] = code
+			}
+		}
+	}
+	resp := &internal.Response{Hrefs: []internal.Href{{Path: r.URL.Path}}}
+	for name := range seen {
+		code := http.StatusOK
+		if failed[name] != 0 {
+			code = failed[name]
+		} else if len(failed) != 0 {
+			code = http.StatusFailedDependency
+		}
+		if err := resp.EncodeProp(code, internal.NewRawXMLElement(name, nil, nil)); err != nil {
+			return nil, err
+		}
+	}
+	return resp, nil
 }
 
 func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
@@ -799,11 +888,31 @@ func (b *backend) Mkcol(r *http.Request) error {
 }
 
 func (b *backend) Copy(r *http.Request, dest *internal.Href, recursive, overwrite bool) (created bool, err error) {
-	return false, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: Copy not implemented")
+	return b.transfer(r, dest, overwrite, false)
 }
 
 func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (created bool, err error) {
-	return false, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: Move not implemented")
+	return b.transfer(r, dest, overwrite, true)
+}
+
+func (b *backend) transfer(r *http.Request, dest *internal.Href, overwrite, move bool) (bool, error) {
+	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendarObject || b.resourceTypeAtPath(dest.Path) != resourceTypeCalendarObject {
+		return false, internal.HTTPErrorf(http.StatusMethodNotAllowed, "caldav: COPY and MOVE require calendar objects")
+	}
+	if dest.Host != "" && !strings.EqualFold(dest.Host, r.Host) || dest.User != nil || dest.RawQuery != "" || dest.Fragment != "" {
+		return false, internal.HTTPErrorf(http.StatusForbidden, "caldav: destination is outside this server")
+	}
+	if dest.Scheme != "" && dest.Scheme != "http" && dest.Scheme != "https" {
+		return false, internal.HTTPErrorf(http.StatusForbidden, "caldav: unsupported destination scheme")
+	}
+	backend, ok := b.Backend.(CalendarObjectTransferBackend)
+	if !ok {
+		return false, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: object transfer not implemented")
+	}
+	if move {
+		return backend.MoveCalendarObject(r.Context(), r.URL.Path, dest.Path, overwrite)
+	}
+	return backend.CopyCalendarObject(r.Context(), r.URL.Path, dest.Path, overwrite)
 }
 
 // https://datatracker.ietf.org/doc/html/rfc4791#section-5.3.2.1

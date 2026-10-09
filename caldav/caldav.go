@@ -4,6 +4,8 @@
 package caldav
 
 import (
+	"context"
+	"encoding/xml"
 	"fmt"
 	"time"
 
@@ -66,6 +68,7 @@ func ValidateCalendarObject(cal *ical.Calendar) (eventType string, uid string, e
 type Calendar struct {
 	Path                  string
 	Name                  string
+	DisplayName           string
 	Description           string
 	MaxResourceSize       int64
 	SupportedComponentSet []string
@@ -74,6 +77,25 @@ type Calendar struct {
 	WriteContent          bool
 	Bind                  bool
 	Unbind                bool
+}
+
+// CalendarPropertyUpdate is a requested change to a writable calendar property.
+type CalendarPropertyUpdate struct {
+	Name   xml.Name
+	Value  string
+	Remove bool
+}
+
+// CalendarPropertyBackend is optional so existing CalDAV backends need not
+// implement writable collection metadata.
+type CalendarPropertyBackend interface {
+	PatchCalendarProperties(context.Context, string, []CalendarPropertyUpdate) error
+}
+
+// CalendarObjectTransferBackend is optional for calendar object COPY and MOVE.
+type CalendarObjectTransferBackend interface {
+	CopyCalendarObject(context.Context, string, string, bool) (bool, error)
+	MoveCalendarObject(context.Context, string, string, bool) (bool, error)
 }
 
 type CalendarCompRequest struct {
