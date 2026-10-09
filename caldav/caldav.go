@@ -6,6 +6,7 @@ package caldav
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"time"
 
@@ -96,6 +97,34 @@ type CalendarPropertyBackend interface {
 type CalendarObjectTransferBackend interface {
 	CopyCalendarObject(context.Context, string, string, bool) (bool, error)
 	MoveCalendarObject(context.Context, string, string, bool) (bool, error)
+}
+
+// CalendarCollectionTransferBackend is optional for calendar collection
+// COPY and MOVE. COPY receives whether the request has infinite depth.
+type CalendarCollectionTransferBackend interface {
+	CopyCalendarCollection(context.Context, string, string, bool, bool) (bool, error)
+	MoveCalendarCollection(context.Context, string, string, bool) (bool, error)
+}
+
+// ErrInvalidSyncToken asks the DAV handler to return DAV:valid-sync-token.
+var ErrInvalidSyncToken = errors.New("invalid calendar sync token")
+
+type CalendarSyncChange struct {
+	Path   string
+	Object *CalendarObject // nil for a removed or no-longer-readable member
+}
+
+type CalendarSyncResult struct {
+	Token   string
+	Changes []CalendarSyncChange
+	More    bool
+}
+
+// CalendarSyncBackend is optional. Tokens and results are scoped to the
+// authenticated user and the calendar collection path.
+type CalendarSyncBackend interface {
+	CalendarSyncToken(context.Context, string) (string, error)
+	SyncCalendarObjects(context.Context, string, string, int) (*CalendarSyncResult, error)
 }
 
 type CalendarCompRequest struct {

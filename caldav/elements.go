@@ -225,6 +225,28 @@ type reportReq struct {
 	Query    *calendarQuery
 	Multiget *calendarMultiget
 	FreeBusy *freeBusyQuery
+	Sync     *internal.SyncCollectionQuery
+}
+
+type syncTokenProperty struct {
+	XMLName xml.Name `xml:"DAV: sync-token"`
+	Value   string   `xml:",chardata"`
+}
+
+type supportedSyncReports struct {
+	XMLName xml.Name              `xml:"DAV: supported-report-set"`
+	Reports []supportedSyncReport `xml:"DAV: supported-report"`
+}
+
+type supportedSyncReport struct {
+	Report supportedSyncReportName `xml:"DAV: report"`
+}
+
+type supportedSyncReportName struct {
+	SyncCollection   *struct{} `xml:"DAV: sync-collection,omitempty"`
+	CalendarQuery    *struct{} `xml:"urn:ietf:params:xml:ns:caldav calendar-query,omitempty"`
+	CalendarMultiget *struct{} `xml:"urn:ietf:params:xml:ns:caldav calendar-multiget,omitempty"`
+	FreeBusyQuery    *struct{} `xml:"urn:ietf:params:xml:ns:caldav free-busy-query,omitempty"`
 }
 
 type freeBusyQuery struct {
@@ -244,6 +266,9 @@ func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	case freeBusyQueryName:
 		r.FreeBusy = &freeBusyQuery{}
 		v = r.FreeBusy
+	case (xml.Name{Space: internal.Namespace, Local: "sync-collection"}):
+		r.Sync = &internal.SyncCollectionQuery{}
+		v = r.Sync
 	default:
 		return fmt.Errorf("caldav: unsupported REPORT root %q %q", start.Name.Space, start.Name.Local)
 	}

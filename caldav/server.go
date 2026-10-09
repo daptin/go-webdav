@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -98,6 +99,8 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 		return h.handleQuery(r, w, report.Query)
 	} else if report.Multiget != nil {
 		return h.handleMultiget(r.Context(), w, report.Multiget)
+	} else if report.Sync != nil {
+		return h.handleSync(r, w, report.Sync)
 	} else if report.FreeBusy != nil {
 		if len(report.FreeBusy.TimeRanges) != 1 {
 			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: free-busy-query requires one time-range")
@@ -129,6 +132,71 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	return internal.HTTPErrorf(http.StatusBadRequest, "caldav: unsupported REPORT request")
+}
+
+func (h *Handler) handleSync(r *http.Request, w http.ResponseWriter, query *internal.SyncCollectionQuery) error {
+	b := backend{Backend: h.Backend, Prefix: strings.TrimSuffix(h.Prefix, "/")}
+	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendar {
+		return internal.HTTPErrorf(http.StatusForbidden, "caldav: sync requires a calendar collection")
+	}
+	if depth := r.Header.Get("Depth"); depth != "" && depth != "0" {
+		return internal.HTTPErrorf(http.StatusBadRequest, "caldav: sync requires Depth: 0")
+	}
+	backend, ok := h.Backend.(CalendarSyncBackend)
+	if !ok {
+		return internal.HTTPErrorf(http.StatusNotImplemented, "caldav: collection sync not implemented")
+	}
+	if query.SyncLevel != "1" && query.SyncLevel != "infinite" || query.Prop == nil {
+		return internal.HTTPErrorf(http.StatusBadRequest, "caldav: invalid sync report")
+	}
+	limit := 1000
+	if query.Limit != nil {
+		if query.Limit.NResults == 0 {
+			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: sync limit must be positive")
+		}
+		if query.Limit.NResults < uint(limit) {
+			limit = int(query.Limit.NResults)
+		}
+	}
+	result, err := backend.SyncCalendarObjects(r.Context(), r.URL.Path, query.SyncToken, limit)
+	if errors.Is(err, ErrInvalidSyncToken) {
+		w.Header().Set("Content-Type", "application/xml; charset=\"utf-8\"")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(xml.Header))
+		return xml.NewEncoder(w).Encode(&internal.Error{Raw: []internal.RawXMLValue{
+			*internal.NewRawXMLElement(xml.Name{Space: internal.Namespace, Local: "valid-sync-token"}, nil, nil),
+		}})
+	}
+	if err != nil {
+		return err
+	}
+	propfind := &internal.PropFind{Prop: query.Prop}
+	responses := make([]internal.Response, 0, len(result.Changes))
+	for _, change := range result.Changes {
+		if change.Object == nil {
+			responses = append(responses, internal.Response{
+				Hrefs: []internal.Href{{Path: change.Path}}, Status: &internal.Status{Code: http.StatusNotFound},
+			})
+			continue
+		}
+		response, err := b.propFindCalendarObject(r.Context(), propfind, change.Object)
+		if err != nil {
+			return err
+		}
+		responses = append(responses, *response)
+	}
+	status := internal.NewMultiStatus(responses...)
+	if result.More {
+		status.Responses = append(status.Responses, internal.Response{
+			Hrefs:  []internal.Href{{Path: r.URL.Path}},
+			Status: &internal.Status{Code: http.StatusInsufficientStorage},
+			Error: &internal.Error{Raw: []internal.RawXMLValue{
+				*internal.NewRawXMLElement(xml.Name{Space: internal.Namespace, Local: "number-of-matches-within-limits"}, nil, nil),
+			}},
+		})
+	}
+	status.SyncToken = result.Token
+	return internal.ServeMultiStatus(w, status)
 }
 
 func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
@@ -355,6 +423,9 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 		allow := []string{http.MethodOptions, "PROPFIND", "REPORT", http.MethodDelete}
 		if _, ok := b.Backend.(CalendarPropertyBackend); ok {
 			allow = append(allow, "PROPPATCH")
+		}
+		if _, ok := b.Backend.(CalendarCollectionTransferBackend); ok {
+			allow = append(allow, "COPY", "MOVE")
 		}
 		return caps, allow, nil
 	case resourceTypeCalendarObject:
@@ -634,6 +705,22 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 			Size: cal.MaxResourceSize,
 		})
 	}
+	if syncBackend, ok := b.Backend.(CalendarSyncBackend); ok {
+		props[xml.Name{Space: internal.Namespace, Local: "sync-token"}] = func(*internal.RawXMLValue) (interface{}, error) {
+			token, err := syncBackend.CalendarSyncToken(ctx, cal.Path)
+			if err != nil {
+				return nil, err
+			}
+			return &syncTokenProperty{Value: token}, nil
+		}
+		props[xml.Name{Space: internal.Namespace, Local: "supported-report-set"}] = internal.PropFindValue(
+			&supportedSyncReports{Reports: []supportedSyncReport{
+				{Report: supportedSyncReportName{SyncCollection: &struct{}{}}},
+				{Report: supportedSyncReportName{CalendarQuery: &struct{}{}}},
+				{Report: supportedSyncReportName{CalendarMultiget: &struct{}{}}},
+				{Report: supportedSyncReportName{FreeBusyQuery: &struct{}{}}},
+			}})
+	}
 
 	// TODO: CALDAV:calendar-timezone, CALDAV:supported-calendar-component-set, CALDAV:min-date-time, CALDAV:max-date-time, CALDAV:max-instances, CALDAV:max-attendees-per-instance
 
@@ -888,22 +975,33 @@ func (b *backend) Mkcol(r *http.Request) error {
 }
 
 func (b *backend) Copy(r *http.Request, dest *internal.Href, recursive, overwrite bool) (created bool, err error) {
-	return b.transfer(r, dest, overwrite, false)
+	return b.transfer(r, dest, recursive, overwrite, false)
 }
 
 func (b *backend) Move(r *http.Request, dest *internal.Href, overwrite bool) (created bool, err error) {
-	return b.transfer(r, dest, overwrite, true)
+	return b.transfer(r, dest, true, overwrite, true)
 }
 
-func (b *backend) transfer(r *http.Request, dest *internal.Href, overwrite, move bool) (bool, error) {
-	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendarObject || b.resourceTypeAtPath(dest.Path) != resourceTypeCalendarObject {
-		return false, internal.HTTPErrorf(http.StatusMethodNotAllowed, "caldav: COPY and MOVE require calendar objects")
+func (b *backend) transfer(r *http.Request, dest *internal.Href, recursive, overwrite, move bool) (bool, error) {
+	sourceType, destinationType := b.resourceTypeAtPath(r.URL.Path), b.resourceTypeAtPath(dest.Path)
+	if sourceType != destinationType || sourceType != resourceTypeCalendarObject && sourceType != resourceTypeCalendar {
+		return false, internal.HTTPErrorf(http.StatusMethodNotAllowed, "caldav: COPY and MOVE require matching calendar resources")
 	}
 	if dest.Host != "" && !strings.EqualFold(dest.Host, r.Host) || dest.User != nil || dest.RawQuery != "" || dest.Fragment != "" {
 		return false, internal.HTTPErrorf(http.StatusForbidden, "caldav: destination is outside this server")
 	}
 	if dest.Scheme != "" && dest.Scheme != "http" && dest.Scheme != "https" {
 		return false, internal.HTTPErrorf(http.StatusForbidden, "caldav: unsupported destination scheme")
+	}
+	if sourceType == resourceTypeCalendar {
+		backend, ok := b.Backend.(CalendarCollectionTransferBackend)
+		if !ok {
+			return false, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: collection transfer not implemented")
+		}
+		if move {
+			return backend.MoveCalendarCollection(r.Context(), r.URL.Path, dest.Path, overwrite)
+		}
+		return backend.CopyCalendarCollection(r.Context(), r.URL.Path, dest.Path, recursive, overwrite)
 	}
 	backend, ok := b.Backend.(CalendarObjectTransferBackend)
 	if !ok {

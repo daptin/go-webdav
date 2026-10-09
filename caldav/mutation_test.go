@@ -13,6 +13,7 @@ type mutationBackend struct {
 	properties []CalendarPropertyUpdate
 	source     string
 	dest       string
+	recursive  bool
 }
 
 func (b *mutationBackend) PatchCalendarProperties(_ context.Context, _ string, changes []CalendarPropertyUpdate) error {
@@ -26,6 +27,16 @@ func (b *mutationBackend) CopyCalendarObject(_ context.Context, source, dest str
 }
 
 func (b *mutationBackend) MoveCalendarObject(_ context.Context, source, dest string, _ bool) (bool, error) {
+	b.source, b.dest = source, dest
+	return false, nil
+}
+
+func (b *mutationBackend) CopyCalendarCollection(_ context.Context, source, dest string, recursive, _ bool) (bool, error) {
+	b.source, b.dest, b.recursive = source, dest, recursive
+	return true, nil
+}
+
+func (b *mutationBackend) MoveCalendarCollection(_ context.Context, source, dest string, _ bool) (bool, error) {
 	b.source, b.dest = source, dest
 	return false, nil
 }
@@ -54,5 +65,20 @@ func TestCalendarMutationMethods(t *testing.T) {
 	h.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("foreign MOVE status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest("COPY", "http://example.test/caldav/owner/calendars/team/", nil)
+	request.Header.Set("Destination", "http://example.test/caldav/owner/calendars/copy/")
+	request.Header.Set("Depth", "0")
+	response = httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || b.recursive || b.dest != "/caldav/owner/calendars/copy/" {
+		t.Fatalf("collection COPY status=%d recursive=%t destination=%q body=%s", response.Code, b.recursive, b.dest, response.Body.String())
+	}
+	request = httptest.NewRequest("MOVE", "http://example.test/caldav/owner/calendars/team/", nil)
+	request.Header.Set("Destination", "http://example.test/caldav/owner/calendars/moved/")
+	response = httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || b.dest != "/caldav/owner/calendars/moved/" {
+		t.Fatalf("collection MOVE status=%d destination=%q body=%s", response.Code, b.dest, response.Body.String())
 	}
 }
