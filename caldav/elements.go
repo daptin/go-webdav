@@ -16,6 +16,7 @@ var (
 	calendarDescriptionName           = xml.Name{namespace, "calendar-description"}
 	supportedCalendarDataName         = xml.Name{namespace, "supported-calendar-data"}
 	supportedCalendarComponentSetName = xml.Name{namespace, "supported-calendar-component-set"}
+	supportedCollationSetName         = xml.Name{namespace, "supported-collation-set"}
 	maxResourceSizeName               = xml.Name{namespace, "max-resource-size"}
 
 	calendarQueryName    = xml.Name{namespace, "calendar-query"}
@@ -58,6 +59,11 @@ type supportedCalendarData struct {
 type supportedCalendarComponentSet struct {
 	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav supported-calendar-component-set"`
 	Comp    []comp   `xml:"comp"`
+}
+
+type supportedCollationSet struct {
+	XMLName    xml.Name `xml:"urn:ietf:params:xml:ns:caldav supported-collation-set"`
+	Collations []string `xml:"urn:ietf:params:xml:ns:caldav supported-collation"`
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.6
@@ -184,10 +190,12 @@ func (t *dateWithUTCTime) MarshalText() ([]byte, error) {
 
 // Request variant of https://tools.ietf.org/html/rfc4791#section-9.6
 type calendarDataReq struct {
-	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav calendar-data"`
-	Comp    *comp    `xml:"comp,omitempty"`
-	Expand  *expand  `xml:"expand,omitempty"`
-	// TODO: limit-recurrence-set, limit-freebusy-set
+	XMLName            xml.Name                     `xml:"urn:ietf:params:xml:ns:caldav calendar-data"`
+	Comp               *comp                        `xml:"comp,omitempty"`
+	Expand             *expand                      `xml:"expand,omitempty"`
+	LimitRecurrenceSet *struct{}                    `xml:"limit-recurrence-set,omitempty"`
+	LimitFreebusySet   *struct{}                    `xml:"limit-freebusy-set,omitempty"`
+	Other              []struct{ XMLName xml.Name } `xml:",any"`
 }
 
 // https://tools.ietf.org/html/rfc4791#section-9.6.1
@@ -212,7 +220,7 @@ type expand struct {
 type prop struct {
 	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav prop"`
 	Name    string   `xml:"name,attr"`
-	// TODO: novalue
+	NoValue string   `xml:"novalue,attr,omitempty"`
 }
 
 // Response variant of https://tools.ietf.org/html/rfc4791#section-9.6

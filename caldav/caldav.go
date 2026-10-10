@@ -168,6 +168,7 @@ type PropFilter struct {
 
 type TextMatch struct {
 	Text            string
+	Collation       string
 	NegateCondition bool
 }
 

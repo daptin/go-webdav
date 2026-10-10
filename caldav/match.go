@@ -44,8 +44,7 @@ func match(filter CompFilter, comp *ical.Component) (bool, error) {
 		return filter.IsNotDefined, nil
 	}
 
-	var zeroDate time.Time
-	if filter.Start != zeroDate {
+	if !filter.Start.IsZero() || !filter.End.IsZero() {
 		match, err := matchCompTimeRange(filter.Start, filter.End, comp)
 		if err != nil {
 			return false, err
@@ -76,6 +75,14 @@ func match(filter CompFilter, comp *ical.Component) (bool, error) {
 }
 
 func matchCompFilter(filter CompFilter, comp *ical.Component) (bool, error) {
+	if filter.IsNotDefined {
+		for _, child := range comp.Children {
+			if child.Name == filter.Name {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
 	var matches []*ical.Component
 
 	for _, child := range comp.Children {
@@ -93,46 +100,97 @@ func matchCompFilter(filter CompFilter, comp *ical.Component) (bool, error) {
 }
 
 func matchPropFilter(filter PropFilter, comp *ical.Component) (bool, error) {
-	// TODO: this only matches first field, there can be multiple
-	field := comp.Props.Get(filter.Name)
-	if field == nil {
+	fields := comp.Props.Values(filter.Name)
+	if len(fields) == 0 {
 		return filter.IsNotDefined, nil
 	}
-
-	for _, paramFilter := range filter.ParamFilter {
-		if !matchParamFilter(paramFilter, field) {
-			return false, nil
-		}
+	if filter.IsNotDefined {
+		return false, nil
 	}
-
-	var zeroDate time.Time
-	if filter.Start != zeroDate {
-		match, err := matchPropTimeRange(filter.Start, filter.End, field)
-		if err != nil {
-			return false, err
+	for i := range fields {
+		field := &fields[i]
+		matches := true
+		for _, paramFilter := range filter.ParamFilter {
+			if !matchParamFilter(paramFilter, field) {
+				matches = false
+				break
+			}
 		}
-		if !match {
-			return false, nil
+		if !matches {
+			continue
 		}
-	} else if filter.TextMatch != nil {
-		if !matchTextMatch(*filter.TextMatch, field.Value) {
-			return false, nil
+		if !filter.Start.IsZero() || !filter.End.IsZero() {
+			match, err := matchPropTimeRange(filter.Start, filter.End, field)
+			if err != nil {
+				return false, err
+			}
+			if !match {
+				continue
+			}
+		}
+		if filter.TextMatch != nil && !matchTextMatch(*filter.TextMatch, field.Value) {
+			continue
 		}
 		return true, nil
 	}
-	// empty prop-filter, property exists
-	return true, nil
+	return false, nil
 }
 
 func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error) {
 	// See https://datatracker.ietf.org/doc/html/rfc4791#section-9.9
+	if comp.Name == ical.CompToDo || comp.Name == ical.CompJournal {
+		rset, err := comp.RecurrenceSet(start.Location())
+		if err != nil {
+			return false, err
+		}
+		if rset != nil {
+			initial, err := comp.Props.DateTime(ical.PropDateTimeStart, start.Location())
+			if err != nil {
+				return false, err
+			}
+			// A recurring task can begin before the requested interval and
+			// remain due within it. Check the immediately preceding instance.
+			candidates := []time.Time{rset.Before(start, true), rset.After(start, false)}
+			for _, instance := range candidates {
+				if instance.IsZero() || !end.IsZero() && !instance.Before(end) {
+					continue
+				}
+				shifted := *comp
+				shifted.Props = make(ical.Props, len(comp.Props))
+				for name, values := range comp.Props {
+					shifted.Props[name] = values
+				}
+				if prop := comp.Props.Get(ical.PropDateTimeStart); prop != nil && prop.ValueType() == ical.ValueDate {
+					shifted.Props.SetDate(ical.PropDateTimeStart, instance)
+				} else {
+					shifted.Props.SetDateTime(ical.PropDateTimeStart, instance)
+				}
+				if due := comp.Props.Get(ical.PropDue); due != nil {
+					originalDue, err := due.DateTime(start.Location())
+					if err != nil {
+						return false, err
+					}
+					if due.ValueType() == ical.ValueDate {
+						shifted.Props.SetDate(ical.PropDue, originalDue.Add(instance.Sub(initial)))
+					} else {
+						shifted.Props.SetDateTime(ical.PropDue, originalDue.Add(instance.Sub(initial)))
+					}
+				}
+				match, err := matchTaskOrJournalTimeRange(start, end, &shifted)
+				if err != nil || match {
+					return match, err
+				}
+			}
+			return false, nil
+		}
+		return matchTaskOrJournalTimeRange(start, end, comp)
+	}
 
-	// evaluate recurring components
+	// evaluate recurring events
 	rset, err := comp.RecurrenceSet(start.Location())
 	if err != nil {
 		return false, err
 	}
-	// TODO handle more than just events
 	if comp.Name != ical.CompEvent {
 		if rset != nil {
 			return len(rset.Between(start, end, true)) > 0, nil
@@ -164,20 +222,75 @@ func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error
 		return !next.IsZero() && (end.IsZero() || next.Before(end)), nil
 	}
 
-	// Event starts in time range
-	if eventStart.After(start) && (end.IsZero() || eventStart.Before(end)) {
-		return true, nil
+	if !eventEnd.After(eventStart) {
+		return atOrBefore(start, eventStart) && after(end, eventStart), nil
 	}
-	// Event ends in time range
-	if eventEnd.After(start) && (end.IsZero() || eventEnd.Before(end)) {
-		return true, nil
-	}
-	// Event covers entire time range plus some
-	if eventStart.Before(start) && (!end.IsZero() && eventEnd.After(end)) {
-		return true, nil
-	}
-	return false, nil
+	return before(start, eventEnd) && after(end, eventStart), nil
 }
+
+func matchTaskOrJournalTimeRange(start, end time.Time, comp *ical.Component) (bool, error) {
+	location := start.Location()
+	get := func(name string) (time.Time, error) { return comp.Props.DateTime(name, location) }
+	dtstart, err := get(ical.PropDateTimeStart)
+	if err != nil {
+		return false, err
+	}
+	if comp.Name == ical.CompJournal {
+		if dtstart.IsZero() {
+			return false, nil
+		}
+		if prop := comp.Props.Get(ical.PropDateTimeStart); prop != nil && strings.EqualFold(prop.Params.Get("VALUE"), "DATE") {
+			return before(start, dtstart.AddDate(0, 0, 1)) && after(end, dtstart), nil
+		}
+		return atOrBefore(start, dtstart) && after(end, dtstart), nil
+	}
+	due, err := get(ical.PropDue)
+	if err != nil {
+		return false, err
+	}
+	completed, err := get(ical.PropCompleted)
+	if err != nil {
+		return false, err
+	}
+	created, err := get(ical.PropCreated)
+	if err != nil {
+		return false, err
+	}
+	if !dtstart.IsZero() {
+		if duration := comp.Props.Get(ical.PropDuration); duration != nil {
+			value, err := duration.Duration()
+			if err != nil {
+				return false, err
+			}
+			finish := dtstart.Add(value)
+			return atOrBefore(start, finish) && (after(end, dtstart) || atOrAfter(end, finish)), nil
+		}
+		if !due.IsZero() {
+			return (before(start, due) || atOrBefore(start, dtstart)) &&
+				(after(end, dtstart) || atOrAfter(end, due)), nil
+		}
+		return atOrBefore(start, dtstart) && after(end, dtstart), nil
+	}
+	if !due.IsZero() {
+		return before(start, due) && atOrAfter(end, due), nil
+	}
+	if !completed.IsZero() {
+		if !created.IsZero() {
+			return (atOrBefore(start, created) || atOrBefore(start, completed)) &&
+				(atOrAfter(end, created) || atOrAfter(end, completed)), nil
+		}
+		return atOrBefore(start, completed) && atOrAfter(end, completed), nil
+	}
+	if !created.IsZero() {
+		return after(end, created), nil
+	}
+	return true, nil
+}
+
+func before(bound, value time.Time) bool     { return bound.IsZero() || bound.Before(value) }
+func after(bound, value time.Time) bool      { return bound.IsZero() || bound.After(value) }
+func atOrBefore(bound, value time.Time) bool { return bound.IsZero() || !bound.After(value) }
+func atOrAfter(bound, value time.Time) bool  { return bound.IsZero() || !bound.Before(value) }
 
 func matchPropTimeRange(start, end time.Time, field *ical.Prop) (bool, error) {
 	// See https://datatracker.ietf.org/doc/html/rfc4791#section-9.9
@@ -186,31 +299,50 @@ func matchPropTimeRange(start, end time.Time, field *ical.Prop) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if ptime.After(start) && (end.IsZero() || ptime.Before(end)) {
+	if atOrBefore(start, ptime) && after(end, ptime) {
 		return true, nil
 	}
 	return false, nil
 }
 
 func matchParamFilter(filter ParamFilter, field *ical.Prop) bool {
-	// TODO there can be multiple values
-	value := field.Params.Get(filter.Name)
-	if value == "" {
+	values := field.Params.Values(filter.Name)
+	if len(values) == 0 {
 		return filter.IsNotDefined
-	} else if filter.IsNotDefined {
+	}
+	if filter.IsNotDefined {
 		return false
 	}
 	if filter.TextMatch != nil {
-		return matchTextMatch(*filter.TextMatch, value)
+		for _, value := range values {
+			if matchTextMatch(*filter.TextMatch, value) {
+				return true
+			}
+		}
+		return false
 	}
 	return true
 }
 
 func matchTextMatch(txt TextMatch, value string) bool {
-	// TODO: handle text-match collation attribute
-	match := strings.Contains(value, txt.Text)
+	needle := txt.Text
+	if txt.Collation == "" || txt.Collation == "i;ascii-casemap" {
+		value = asciiLower(value)
+		needle = asciiLower(needle)
+	}
+	match := strings.Contains(value, needle)
 	if txt.NegateCondition {
 		match = !match
 	}
 	return match
+}
+
+func asciiLower(value string) string {
+	bytes := []byte(value)
+	for i, b := range bytes {
+		if b >= 'A' && b <= 'Z' {
+			bytes[i] += 'a' - 'A'
+		}
+	}
+	return string(bytes)
 }

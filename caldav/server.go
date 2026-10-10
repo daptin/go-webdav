@@ -238,7 +238,7 @@ func (h *Handler) handleSync(r *http.Request, w http.ResponseWriter, query *inte
 			})
 			continue
 		}
-		response, err := b.propFindCalendarObject(r.Context(), propfind, change.Object)
+		response, err := b.propFindCalendarObject(r.Context(), propfind, change.Object, true)
 		if err != nil {
 			return err
 		}
@@ -267,7 +267,11 @@ func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
 		pf.IsNotDefined = true
 	}
 	if el.TextMatch != nil {
-		pf.TextMatch = &TextMatch{Text: el.TextMatch.Text}
+		match, err := decodeTextMatch(el.TextMatch)
+		if err != nil {
+			return nil, err
+		}
+		pf.TextMatch = match
 	}
 	return pf, nil
 }
@@ -281,7 +285,11 @@ func decodePropFilter(el *propFilter) (*PropFilter, error) {
 		pf.IsNotDefined = true
 	}
 	if el.TextMatch != nil {
-		pf.TextMatch = &TextMatch{Text: el.TextMatch.Text}
+		match, err := decodeTextMatch(el.TextMatch)
+		if err != nil {
+			return nil, err
+		}
+		pf.TextMatch = match
 	}
 	if el.TimeRange != nil {
 		pf.Start = time.Time(el.TimeRange.Start)
@@ -295,6 +303,17 @@ func decodePropFilter(el *propFilter) (*PropFilter, error) {
 		pf.ParamFilter = append(pf.ParamFilter, *paramFi)
 	}
 	return pf, nil
+}
+
+func decodeTextMatch(el *textMatch) (*TextMatch, error) {
+	collation := el.Collation
+	if collation == "" || collation == "default" {
+		collation = "i;ascii-casemap"
+	}
+	if collation != "i;ascii-casemap" && collation != "i;octet" {
+		return nil, internal.HTTPErrorf(http.StatusForbidden, "caldav: unsupported collation %q", collation)
+	}
+	return &TextMatch{Text: el.Text, Collation: collation, NegateCondition: bool(el.NegateCondition)}, nil
 }
 
 func decodeCompFilter(el *compFilter) (*CompFilter, error) {
@@ -389,7 +408,7 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 			AllProp:  query.AllProp,
 			PropName: query.PropName,
 		}
-		resp, err := b.propFindCalendarObject(r.Context(), &propfind, &co)
+		resp, err := b.propFindCalendarObject(r.Context(), &propfind, &co, true)
 		if err != nil {
 			return err
 		}
@@ -433,7 +452,7 @@ func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, mul
 			AllProp:  multiget.AllProp,
 			PropName: multiget.PropName,
 		}
-		resp, err := b.propFindCalendarObject(ctx, &propfind, co)
+		resp, err := b.propFindCalendarObject(ctx, &propfind, co, true)
 		if err != nil {
 			return err
 		}
@@ -696,7 +715,7 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 			return nil, err
 		}
 
-		resp, err := b.propFindCalendarObject(r.Context(), propfind, ao)
+		resp, err := b.propFindCalendarObject(r.Context(), propfind, ao, false)
 		if err != nil {
 			return nil, err
 		}
@@ -793,6 +812,9 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 			Types: []calendarDataType{
 				{ContentType: ical.MIMEType, Version: "2.0"},
 			},
+		}),
+		supportedCollationSetName: internal.PropFindValue(&supportedCollationSet{
+			Collations: []string{"i;ascii-casemap", "i;octet"},
 		}),
 		supportedCalendarComponentSetName: func(*internal.RawXMLValue) (interface{}, error) {
 			components := []comp{}
@@ -938,7 +960,7 @@ func (b *backend) propFindAllCalendars(ctx context.Context, propfind *internal.P
 	return resps, nil
 }
 
-func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal.PropFind, co *CalendarObject) (*internal.Response, error) {
+func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal.PropFind, co *CalendarObject, report bool) (*internal.Response, error) {
 	props := map[xml.Name]internal.PropFindFunc{
 		internal.CurrentUserPrincipalName: func(*internal.RawXMLValue) (interface{}, error) {
 			path, err := b.Backend.CurrentUserPrincipal(ctx)
@@ -950,15 +972,19 @@ func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal
 		internal.GetContentTypeName: internal.PropFindValue(&internal.GetContentType{
 			Type: ical.MIMEType,
 		}),
-		// TODO: calendar-data can only be used in REPORT requests
-		calendarDataName: func(*internal.RawXMLValue) (interface{}, error) {
-			var buf bytes.Buffer
-			if err := ical.NewEncoder(&buf).Encode(co.Data); err != nil {
+	}
+	if report {
+		props[calendarDataName] = func(raw *internal.RawXMLValue) (interface{}, error) {
+			var request calendarDataReq
+			if err := raw.Decode(&request); err != nil {
+				return nil, internal.HTTPErrorf(http.StatusBadRequest, "caldav: invalid calendar-data selection: %v", err)
+			}
+			selected, err := projectCalendarData(co.Data, &request)
+			if err != nil {
 				return nil, err
 			}
-
-			return &calendarDataResp{Data: buf.Bytes()}, nil
-		},
+			return &calendarDataResp{Data: selected}, nil
+		}
 	}
 
 	if co.ContentLength > 0 {
@@ -993,7 +1019,7 @@ func (b *backend) propFindAllCalendarObjects(ctx context.Context, propfind *inte
 
 	var resps []internal.Response
 	for _, ao := range aos {
-		resp, err := b.propFindCalendarObject(ctx, propfind, &ao)
+		resp, err := b.propFindCalendarObject(ctx, propfind, &ao, false)
 		if err != nil {
 			return nil, err
 		}
