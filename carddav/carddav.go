@@ -4,11 +4,13 @@
 package carddav
 
 import (
+	"context"
+	"errors"
 	"time"
 
-	"github.com/emersion/go-vcard"
 	"github.com/daptin/go-webdav"
 	"github.com/daptin/go-webdav/internal"
+	"github.com/emersion/go-vcard"
 )
 
 var CapabilityAddressBook = webdav.Capability("addressbook")
@@ -107,6 +109,25 @@ type AddressObject struct {
 	ContentLength int64
 	ETag          string
 	Card          vcard.Card
+}
+
+var ErrInvalidSyncToken = errors.New("invalid address book sync token")
+
+type AddressBookSyncChange struct {
+	Path   string
+	Object *AddressObject
+}
+
+type AddressBookSyncResult struct {
+	Token   string
+	Changes []AddressBookSyncChange
+	More    bool
+}
+
+// AddressBookSyncBackend is optional for servers supporting RFC 6578.
+type AddressBookSyncBackend interface {
+	AddressBookSyncToken(context.Context, string) (string, error)
+	SyncAddressObjects(context.Context, string, string, int) (*AddressBookSyncResult, error)
 }
 
 // SyncQuery is the query struct represents a sync-collection request

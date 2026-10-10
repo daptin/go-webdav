@@ -194,6 +194,7 @@ type addressDataResp struct {
 type reportReq struct {
 	Query    *addressbookQuery
 	Multiget *addressbookMultiget
+	Sync     *internal.SyncCollectionQuery
 }
 
 func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
@@ -205,11 +206,29 @@ func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	case addressBookMultigetName:
 		r.Multiget = &addressbookMultiget{}
 		v = r.Multiget
+	case (xml.Name{Space: internal.Namespace, Local: "sync-collection"}):
+		r.Sync = &internal.SyncCollectionQuery{}
+		v = r.Sync
 	default:
 		return fmt.Errorf("carddav: unsupported REPORT root %q %q", start.Name.Space, start.Name.Local)
 	}
 
 	return d.DecodeElement(v, &start)
+}
+
+type supportedSyncReports struct {
+	XMLName xml.Name              `xml:"DAV: supported-report-set"`
+	Reports []supportedSyncReport `xml:"DAV: supported-report"`
+}
+
+type supportedSyncReport struct {
+	Report supportedSyncReportName `xml:"DAV: report"`
+}
+
+type supportedSyncReportName struct {
+	SyncCollection   *struct{} `xml:"DAV: sync-collection,omitempty"`
+	AddressBookQuery *struct{} `xml:"urn:ietf:params:xml:ns:carddav addressbook-query,omitempty"`
+	AddressBookMulti *struct{} `xml:"urn:ietf:params:xml:ns:carddav addressbook-multiget,omitempty"`
 }
 
 type mkcolReq struct {

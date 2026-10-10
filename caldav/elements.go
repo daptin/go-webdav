@@ -282,3 +282,12 @@ type mkcolReq struct {
 	DisplayName  string                `xml:"set>prop>displayname"`
 	// TODO this could theoretically contain all addressbook properties?
 }
+
+type mkcalendarReq struct {
+	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:caldav mkcalendar"`
+	Set     []struct {
+		Prop  []internal.Prop        `xml:"DAV: prop"`
+		Other []internal.RawXMLValue `xml:",any"`
+	} `xml:"DAV: set"`
+	Other []internal.RawXMLValue `xml:",any"`
+}

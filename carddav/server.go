@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -11,9 +12,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/emersion/go-vcard"
 	"github.com/daptin/go-webdav"
 	"github.com/daptin/go-webdav/internal"
+	"github.com/emersion/go-vcard"
 )
 
 type PutAddressObjectOptions struct {
@@ -94,8 +95,75 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 		return h.handleQuery(r, w, report.Query)
 	} else if report.Multiget != nil {
 		return h.handleMultiget(r.Context(), w, report.Multiget)
+	} else if report.Sync != nil {
+		return h.handleSync(r, w, report.Sync)
 	}
-	return internal.HTTPErrorf(http.StatusBadRequest, "carddav: expected addressbook-query or addressbook-multiget element in REPORT request")
+	return internal.HTTPErrorf(http.StatusBadRequest, "carddav: unsupported REPORT request")
+}
+
+func (h *Handler) handleSync(r *http.Request, w http.ResponseWriter, query *internal.SyncCollectionQuery) error {
+	b := backend{Backend: h.Backend, Prefix: strings.TrimSuffix(h.Prefix, "/")}
+	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeAddressBook {
+		return internal.HTTPErrorf(http.StatusForbidden, "carddav: sync requires an address book")
+	}
+	if depth := r.Header.Get("Depth"); depth != "" && depth != "0" {
+		return internal.HTTPErrorf(http.StatusBadRequest, "carddav: sync requires Depth: 0")
+	}
+	backend, ok := h.Backend.(AddressBookSyncBackend)
+	if !ok {
+		return internal.HTTPErrorf(http.StatusNotImplemented, "carddav: collection sync not implemented")
+	}
+	if (query.SyncLevel != "1" && query.SyncLevel != "infinite") || query.Prop == nil {
+		return internal.HTTPErrorf(http.StatusBadRequest, "carddav: invalid sync report")
+	}
+	limit := 1000
+	if query.Limit != nil {
+		if query.Limit.NResults == 0 {
+			return internal.HTTPErrorf(http.StatusBadRequest, "carddav: sync limit must be positive")
+		}
+		if query.Limit.NResults < uint(limit) {
+			limit = int(query.Limit.NResults)
+		}
+	}
+	result, err := backend.SyncAddressObjects(r.Context(), r.URL.Path, query.SyncToken, limit)
+	if errors.Is(err, ErrInvalidSyncToken) {
+		w.Header().Set("Content-Type", "application/xml; charset=\"utf-8\"")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(xml.Header))
+		return xml.NewEncoder(w).Encode(&internal.Error{Raw: []internal.RawXMLValue{
+			*internal.NewRawXMLElement(xml.Name{Space: internal.Namespace, Local: "valid-sync-token"}, nil, nil),
+		}})
+	}
+	if err != nil {
+		return err
+	}
+	propfind := &internal.PropFind{Prop: query.Prop}
+	responses := make([]internal.Response, 0, len(result.Changes))
+	for _, change := range result.Changes {
+		if change.Object == nil {
+			responses = append(responses, internal.Response{
+				Hrefs: []internal.Href{{Path: change.Path}}, Status: &internal.Status{Code: http.StatusNotFound},
+			})
+			continue
+		}
+		response, err := b.propFindAddressObject(r.Context(), propfind, change.Object)
+		if err != nil {
+			return err
+		}
+		responses = append(responses, *response)
+	}
+	status := internal.NewMultiStatus(responses...)
+	if result.More {
+		status.Responses = append(status.Responses, internal.Response{
+			Hrefs:  []internal.Href{{Path: r.URL.Path}},
+			Status: &internal.Status{Code: http.StatusInsufficientStorage},
+			Error: &internal.Error{Raw: []internal.RawXMLValue{
+				*internal.NewRawXMLElement(xml.Name{Space: internal.Namespace, Local: "number-of-matches-within-limits"}, nil, nil),
+			}},
+		})
+	}
+	status.SyncToken = result.Token
+	return internal.ServeMultiStatus(w, status)
 }
 
 func decodePropFilter(el *propFilter) (*PropFilter, error) {
@@ -504,6 +572,25 @@ func (b *backend) propFindAddressBook(ctx context.Context, propfind *internal.Pr
 				Write: &struct{}{},
 			}},
 		}),
+	}
+	if syncBackend, ok := b.Backend.(AddressBookSyncBackend); ok {
+		props[xml.Name{Space: internal.Namespace, Local: "sync-token"}] = func(*internal.RawXMLValue) (interface{}, error) {
+			token, err := syncBackend.AddressBookSyncToken(ctx, ab.Path)
+			if err != nil {
+				return nil, err
+			}
+			return &struct {
+				XMLName xml.Name `xml:"DAV: sync-token"`
+				Value   string   `xml:",chardata"`
+			}{Value: token}, nil
+		}
+		props[xml.Name{Space: internal.Namespace, Local: "supported-report-set"}] = internal.PropFindValue(&supportedSyncReports{
+			Reports: []supportedSyncReport{
+				{Report: supportedSyncReportName{SyncCollection: &struct{}{}}},
+				{Report: supportedSyncReportName{AddressBookQuery: &struct{}{}}},
+				{Report: supportedSyncReportName{AddressBookMulti: &struct{}{}}},
+			},
+		})
 	}
 
 	if ab.Name != "" {

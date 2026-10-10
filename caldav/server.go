@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"path"
@@ -75,6 +76,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "REPORT":
 		err = h.handleReport(w, r)
+	case "MKCALENDAR":
+		err = h.handleMkcalendar(w, r)
 	default:
 		b := backend{
 			Backend: h.Backend,
@@ -87,6 +90,58 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		internal.ServeError(w, err)
 	}
+}
+
+func (h *Handler) handleMkcalendar(w http.ResponseWriter, r *http.Request) error {
+	b := backend{Backend: h.Backend, Prefix: strings.TrimSuffix(h.Prefix, "/")}
+	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendar {
+		return internal.HTTPErrorf(http.StatusForbidden, "caldav: calendar creation not allowed at given location")
+	}
+	cal := &Calendar{Path: r.URL.Path}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20+1))
+	if err != nil || len(body) > 1<<20 {
+		return internal.HTTPErrorf(http.StatusBadRequest, "caldav: invalid MKCALENDAR body")
+	}
+	if len(body) != 0 {
+		if mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil ||
+			(mediaType != "application/xml" && mediaType != "text/xml") {
+			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: expected XML MKCALENDAR body")
+		}
+		var request mkcalendarReq
+		if err := xml.Unmarshal(body, &request); err != nil || len(request.Set) != 1 ||
+			len(request.Other) != 0 || len(request.Set[0].Prop) != 1 || len(request.Set[0].Other) != 0 {
+			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: invalid MKCALENDAR body")
+		}
+		seen := make(map[xml.Name]bool)
+		for _, raw := range request.Set[0].Prop[0].Raw {
+			name, ok := raw.XMLName()
+			if !ok || seen[name] {
+				return internal.HTTPErrorf(http.StatusBadRequest, "caldav: duplicate or invalid calendar property")
+			}
+			seen[name] = true
+			var value struct {
+				Text  string `xml:",chardata"`
+				Inner string `xml:",innerxml"`
+			}
+			if err := raw.Decode(&value); err != nil || strings.Contains(value.Inner, "<") {
+				return internal.HTTPErrorf(http.StatusBadRequest, "caldav: invalid calendar property value")
+			}
+			switch name {
+			case internal.DisplayNameName:
+				cal.DisplayName = value.Text
+			case calendarDescriptionName:
+				cal.Description = value.Text
+			default:
+				return internal.HTTPErrorf(http.StatusForbidden, "caldav: unsupported calendar property")
+			}
+		}
+	}
+	if err := h.Backend.CreateCalendar(r.Context(), cal); err != nil {
+		return err
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusCreated)
+	return nil
 }
 
 func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
@@ -418,7 +473,7 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 	case resourceTypeRoot, resourceTypeUserPrincipal:
 		return caps, []string{http.MethodOptions, "PROPFIND"}, nil
 	case resourceTypeCalendarHomeSet:
-		return caps, []string{http.MethodOptions, "PROPFIND", "MKCOL"}, nil
+		return caps, []string{http.MethodOptions, "PROPFIND", "MKCOL", "MKCALENDAR"}, nil
 	case resourceTypeCalendar:
 		allow := []string{http.MethodOptions, "PROPFIND", "REPORT", http.MethodDelete}
 		if _, ok := b.Backend.(CalendarPropertyBackend); ok {
