@@ -465,6 +465,7 @@ type Privilege struct {
 	Read         *struct{} `xml:"DAV: read,omitempty"`
 	Write        *struct{} `xml:"DAV: write,omitempty"`
 	WriteContent *struct{} `xml:"DAV: write-content,omitempty"`
+	WriteACL     *struct{} `xml:"DAV: write-acl,omitempty"`
 	ReadFreeBusy *struct{} `xml:"urn:ietf:params:xml:ns:caldav read-free-busy,omitempty"`
 	Bind         *struct{} `xml:"DAV: bind,omitempty"`
 	Unbind       *struct{} `xml:"DAV: unbind,omitempty"`

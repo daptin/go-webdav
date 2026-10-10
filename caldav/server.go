@@ -78,6 +78,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err = h.handleReport(w, r)
 	case "MKCALENDAR":
 		err = h.handleMkcalendar(w, r)
+	case "ACL":
+		err = h.handleACL(w, r)
 	default:
 		b := backend{
 			Backend: h.Backend,
@@ -453,6 +455,7 @@ const (
 	resourceTypeCalendarHomeSet
 	resourceTypeCalendar
 	resourceTypeCalendarObject
+	resourceTypeGroupPrincipal
 )
 
 func (b *backend) resourceTypeAtPath(reqPath string) resourceType {
@@ -464,18 +467,24 @@ func (b *backend) resourceTypeAtPath(reqPath string) resourceType {
 	if p == "/" {
 		return resourceTypeRoot
 	}
+	if strings.HasPrefix(p, "/groups/") && len(strings.Split(strings.Trim(p, "/"), "/")) == 2 {
+		return resourceTypeGroupPrincipal
+	}
 	return resourceType(len(strings.Split(p, "/")) - 1)
 }
 
 func (b *backend) Options(r *http.Request) (caps []string, allow []string, err error) {
 	caps = []string{"calendar-access"}
 	switch b.resourceTypeAtPath(r.URL.Path) {
-	case resourceTypeRoot, resourceTypeUserPrincipal:
+	case resourceTypeRoot, resourceTypeUserPrincipal, resourceTypeGroupPrincipal:
 		return caps, []string{http.MethodOptions, "PROPFIND"}, nil
 	case resourceTypeCalendarHomeSet:
 		return caps, []string{http.MethodOptions, "PROPFIND", "MKCOL", "MKCALENDAR"}, nil
 	case resourceTypeCalendar:
 		allow := []string{http.MethodOptions, "PROPFIND", "REPORT", http.MethodDelete}
+		if _, ok := b.Backend.(CalendarACLBackend); ok {
+			allow = append(allow, "ACL")
+		}
 		if _, ok := b.Backend.(CalendarPropertyBackend); ok {
 			allow = append(allow, "PROPPATCH")
 		}
@@ -579,6 +588,26 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 				}
 			}
 		}
+	case resourceTypeGroupPrincipal:
+		aclBackend, ok := b.Backend.(CalendarACLBackend)
+		if !ok {
+			return nil, internal.HTTPErrorf(http.StatusNotFound, "caldav: group principal unavailable")
+		}
+		if err := aclBackend.GetGroupPrincipal(r.Context(), r.URL.Path); err != nil {
+			return nil, err
+		}
+		props := map[xml.Name]internal.PropFindFunc{
+			internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.PrincipalName)),
+			xml.Name{Space: internal.Namespace, Local: "principal-URL"}: internal.PropFindValue(&struct {
+				XMLName xml.Name `xml:"DAV: principal-URL"`
+				Href    string   `xml:"DAV: href"`
+			}{Href: r.URL.Path}),
+		}
+		resp, err := internal.NewPropFindResponse(r.URL.Path, propfind, props)
+		if err != nil {
+			return nil, err
+		}
+		resps = append(resps, *resp)
 	case resourceTypeCalendarHomeSet:
 		homeSetPath, err := b.Backend.CalendarHomeSetPath(r.Context(), r.URL.Path)
 		if err != nil {
@@ -661,6 +690,10 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 		internal.CurrentUserPrincipalName: internal.PropFindValue(&internal.CurrentUserPrincipal{
 			Href: internal.Href{Path: principalPath},
 		}),
+		xml.Name{Space: internal.Namespace, Local: "principal-URL"}: internal.PropFindValue(&struct {
+			XMLName xml.Name `xml:"DAV: principal-URL"`
+			Href    string   `xml:"DAV: href"`
+		}{Href: requestedPath}),
 		calendarHomeSetName: internal.PropFindValue(&calendarHomeSet{
 			Href: internal.Href{Path: homeSetPath},
 		}),
@@ -737,8 +770,41 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 			if cal.Unbind {
 				privileges = append(privileges, internal.Privilege{Unbind: &struct{}{}})
 			}
+			if aclBackend, ok := b.Backend.(CalendarACLBackend); ok {
+				acl, err := aclBackend.GetCalendarACL(ctx, cal.Path)
+				if err != nil {
+					return nil, err
+				}
+				if acl.CanWrite {
+					privileges = append(privileges, internal.Privilege{WriteACL: &struct{}{}})
+				}
+			}
 			return &internal.CurrentUserPrivilegeSet{Privilege: privileges}, nil
 		},
+	}
+	if aclBackend, ok := b.Backend.(CalendarACLBackend); ok {
+		props[xml.Name{Space: internal.Namespace, Local: "acl-restrictions"}] = internal.PropFindValue(&aclRestrictionsXML{
+			GrantOnly: &struct{}{}, NoInvert: &struct{}{},
+		})
+		props[xml.Name{Space: internal.Namespace, Local: "supported-privilege-set"}] = internal.PropFindValue(supportedCalendarACLPrivileges())
+		props[xml.Name{Space: internal.Namespace, Local: "principal-collection-set"}] = internal.PropFindValue(&principalCollectionSetXML{Href: b.Prefix + "/"})
+		props[xml.Name{Space: internal.Namespace, Local: "acl"}] = func(*internal.RawXMLValue) (interface{}, error) {
+			acl, err := aclBackend.GetCalendarACL(ctx, cal.Path)
+			if err != nil {
+				return nil, err
+			}
+			return calendarACLProperty(acl), nil
+		}
+		props[xml.Name{Space: internal.Namespace, Local: "owner"}] = func(*internal.RawXMLValue) (interface{}, error) {
+			acl, err := aclBackend.GetCalendarACL(ctx, cal.Path)
+			if err != nil {
+				return nil, err
+			}
+			return &struct {
+				XMLName xml.Name `xml:"DAV: owner"`
+				Href    string   `xml:"DAV: href"`
+			}{Href: acl.Owner}, nil
+		}
 	}
 
 	displayName := cal.DisplayName
