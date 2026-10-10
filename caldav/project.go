@@ -14,9 +14,6 @@ import (
 // through go-ical's validating encoder.
 func projectCalendarData(calendar *ical.Calendar, request *calendarDataReq) ([]byte, error) {
 	if request != nil {
-		if len(request.Other) != 0 {
-			return nil, internal.HTTPErrorf(http.StatusBadRequest, "caldav: invalid calendar-data selection")
-		}
 		if request.Expand != nil || request.LimitRecurrenceSet != nil || request.LimitFreebusySet != nil {
 			return nil, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: recurrence data selection is unavailable")
 		}
