@@ -40,6 +40,14 @@ func TestCalendarACLMethodAndProperties(t *testing.T) {
 		backend.entries[0].Privileges[0] != (xml.Name{Space: "DAV:", Local: "read"}) {
 		t.Fatalf("ACL status=%d entries=%#v body=%s", response.Code, backend.entries, response.Body.String())
 	}
+	request = httptest.NewRequest("ACL", "/user/calendars/team/", strings.NewReader(
+		`<D:acl xmlns:D="DAV:"><D:ace><D:principal><D:href>http://example.com/user/delegate/</D:href></D:principal><D:grant><D:privilege><D:read/></D:privilege></D:grant></D:ace></D:acl>`))
+	request.Header.Set("Content-Type", "application/xml")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || backend.entries[0].Principal != "/user/delegate/" {
+		t.Fatalf("same-origin ACL status=%d entries=%#v", response.Code, backend.entries)
+	}
 	request = httptest.NewRequest("PROPFIND", "/user/calendars/team/", strings.NewReader(
 		`<D:propfind xmlns:D="DAV:"><D:prop><D:acl/><D:owner/><D:acl-restrictions/><D:supported-privilege-set/><D:current-user-privilege-set/></D:prop></D:propfind>`))
 	request.Header.Set("Content-Type", "application/xml")
@@ -58,6 +66,7 @@ func TestCalendarACLRejectsUnsupportedACE(t *testing.T) {
 	for _, body := range []string{
 		`<D:acl xmlns:D="DAV:"><D:ace><D:principal><D:href>/user/delegate/</D:href></D:principal><D:deny><D:privilege><D:read/></D:privilege></D:deny></D:ace></D:acl>`,
 		`<D:acl xmlns:D="DAV:"><D:ace><D:principal><D:href>/user/delegate/</D:href></D:principal><D:grant><D:privilege><D:read/></D:privilege></D:grant><D:invert/></D:ace></D:acl>`,
+		`<D:acl xmlns:D="DAV:"><D:ace><D:principal><D:href>https://outside.example/user/delegate/</D:href></D:principal><D:grant><D:privilege><D:read/></D:privilege></D:grant></D:ace></D:acl>`,
 	} {
 		request := httptest.NewRequest("ACL", "/user/calendars/team/", strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/xml")

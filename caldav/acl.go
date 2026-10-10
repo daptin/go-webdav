@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/daptin/go-webdav/internal"
@@ -136,7 +137,18 @@ func (h *Handler) handleACL(w http.ResponseWriter, r *http.Request) error {
 			len(ace.Grant.Other) != 0 || len(ace.Other) != 0 || ace.Deny != nil || ace.Inherited != nil || len(ace.Grant.Privileges) == 0 {
 			return internal.HTTPErrorf(http.StatusForbidden, "caldav: unsupported ACE")
 		}
-		entry := CalendarACE{Principal: ace.Principal.Href[0], Protected: ace.Protected != nil}
+		href := ace.Principal.Href[0]
+		parsed, err := url.Parse(href)
+		if err != nil {
+			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: invalid ACL principal URL")
+		}
+		if parsed.IsAbs() {
+			if parsed.Scheme != "http" && parsed.Scheme != "https" || !strings.EqualFold(parsed.Host, r.Host) {
+				return internal.HTTPErrorf(http.StatusForbidden, "caldav: ACL principal is outside this server")
+			}
+			href = parsed.Path
+		}
+		entry := CalendarACE{Principal: href, Protected: ace.Protected != nil}
 		for _, privilege := range ace.Grant.Privileges {
 			if len(privilege.Names) != 1 {
 				return internal.HTTPErrorf(http.StatusBadRequest, "caldav: invalid privilege")
