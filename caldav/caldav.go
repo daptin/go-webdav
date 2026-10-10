@@ -76,6 +76,7 @@ type Calendar struct {
 	Read                  bool
 	ReadFreeBusy          bool
 	WriteContent          bool
+	WriteProperties       bool
 	Bind                  bool
 	Unbind                bool
 }

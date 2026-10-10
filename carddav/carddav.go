@@ -5,6 +5,7 @@ package carddav
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"time"
 
@@ -27,9 +28,27 @@ type AddressDataType struct {
 type AddressBook struct {
 	Path                 string
 	Name                 string
+	DisplayName          string
 	Description          string
+	Read                 bool
+	WriteContent         bool
+	WriteProperties      bool
+	Bind                 bool
+	Unbind               bool
 	MaxResourceSize      int64
 	SupportedAddressData []AddressDataType
+}
+
+type AddressBookPropertyUpdate struct {
+	Name   xml.Name
+	Value  string
+	Remove bool
+}
+
+// AddressBookPropertyBackend is optional; collection metadata remains owned by
+// the application backend.
+type AddressBookPropertyBackend interface {
+	PatchAddressBookProperties(context.Context, string, []AddressBookPropertyUpdate) error
 }
 
 func (ab *AddressBook) SupportsAddressData(contentType, version string) bool {

@@ -563,11 +563,15 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 		}
 		resps = append(resps, *resp)
 	case resourceTypeUserPrincipal:
-		homeSetPath, err := b.Backend.CalendarHomeSetPath(r.Context(), r.URL.Path)
+		principalPath, err := b.Backend.CurrentUserPrincipal(r.Context())
 		if err != nil {
 			return nil, err
 		}
-		if r.URL.Path == strings.TrimSuffix(homeSetPath, "calendars/") {
+		if r.URL.Path == principalPath {
+			homeSetPath, err := b.Backend.CalendarHomeSetPath(r.Context(), r.URL.Path)
+			if err != nil {
+				return nil, err
+			}
 			resp, err := b.propFindUserPrincipal(r.Context(), propfind, r.URL.Path)
 			if err != nil {
 				return nil, err
@@ -587,6 +591,27 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 					resps = append(resps, resps_...)
 				}
 			}
+		}
+		if r.URL.Path != principalPath {
+			aclBackend, ok := b.Backend.(CalendarAccountPrincipalBackend)
+			if !ok {
+				return nil, internal.HTTPErrorf(http.StatusNotFound, "caldav: account principal unavailable")
+			}
+			if err := aclBackend.GetAccountPrincipal(r.Context(), r.URL.Path); err != nil {
+				return nil, err
+			}
+			props := map[xml.Name]internal.PropFindFunc{
+				internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, internal.PrincipalName)),
+				xml.Name{Space: internal.Namespace, Local: "principal-URL"}: internal.PropFindValue(&struct {
+					XMLName xml.Name `xml:"DAV: principal-URL"`
+					Href    string   `xml:"DAV: href"`
+				}{Href: r.URL.Path}),
+			}
+			resp, err := internal.NewPropFindResponse(r.URL.Path, propfind, props)
+			if err != nil {
+				return nil, err
+			}
+			resps = append(resps, *resp)
 		}
 	case resourceTypeGroupPrincipal:
 		aclBackend, ok := b.Backend.(CalendarACLBackend)
@@ -763,6 +788,9 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 			}
 			if cal.WriteContent {
 				privileges = append(privileges, internal.Privilege{WriteContent: &struct{}{}})
+			}
+			if cal.WriteProperties {
+				privileges = append(privileges, internal.Privilege{WriteProperties: &struct{}{}})
 			}
 			if cal.Bind {
 				privileges = append(privileges, internal.Privilege{Bind: &struct{}{}})

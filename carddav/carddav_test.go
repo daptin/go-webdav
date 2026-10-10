@@ -230,8 +230,8 @@ func TestCreateAddressbookMinimalBody(t *testing.T) {
 		t.Fatalf("Found %d address books, expected 1", len(tb.addressBooks))
 	}
 	c := tb.addressBooks[0]
-	if c.Name != "Lisa's Contacts" {
-		t.Fatalf("Address book name is '%s', expected 'Lisa's Contacts'", c.Name)
+	if c.DisplayName != "Lisa's Contacts" {
+		t.Fatalf("Address book display name is '%s', expected 'Lisa's Contacts'", c.DisplayName)
 	}
 	if c.Path != "/dav/addressbooks/user0/test-addressbook" {
 		t.Fatalf("Address book path is '%s', expected '/dav/addressbooks/user0/test-addressbook'", c.Path)

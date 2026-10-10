@@ -71,6 +71,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "REPORT":
 		err = h.handleReport(w, r)
+	case "ACL":
+		err = h.handleACL(w, r)
 	default:
 		b := backend{
 			Backend: h.Backend,
@@ -332,6 +334,7 @@ const (
 	resourceTypeAddressBookHomeSet
 	resourceTypeAddressBook
 	resourceTypeAddressObject
+	resourceTypeGroupPrincipal
 )
 
 func (b *backend) resourceTypeAtPath(reqPath string) resourceType {
@@ -343,16 +346,28 @@ func (b *backend) resourceTypeAtPath(reqPath string) resourceType {
 	if p == "/" {
 		return resourceTypeRoot
 	}
+	if strings.HasPrefix(p, "/groups/") && len(strings.Split(strings.Trim(p, "/"), "/")) == 2 {
+		return resourceTypeGroupPrincipal
+	}
 	return resourceType(len(strings.Split(p, "/")) - 1)
 }
 
 func (b *backend) Options(r *http.Request) (caps []string, allow []string, err error) {
 	caps = []string{"addressbook"}
-
-	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeAddressObject {
-		// Note: some clients assume the address book is read-only when
-		// DELETE/MKCOL are missing
-		return caps, []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL"}, nil
+	switch b.resourceTypeAtPath(r.URL.Path) {
+	case resourceTypeRoot, resourceTypeUserPrincipal, resourceTypeGroupPrincipal:
+		return caps, []string{http.MethodOptions, "PROPFIND"}, nil
+	case resourceTypeAddressBookHomeSet:
+		return caps, []string{http.MethodOptions, "PROPFIND", "MKCOL"}, nil
+	case resourceTypeAddressBook:
+		allow := []string{http.MethodOptions, "PROPFIND", "REPORT", http.MethodDelete}
+		if _, ok := b.Backend.(AddressBookPropertyBackend); ok {
+			allow = append(allow, "PROPPATCH")
+		}
+		if _, ok := b.Backend.(AddressBookACLBackend); ok {
+			allow = append(allow, "ACL")
+		}
+		return caps, allow, nil
 	}
 
 	var dataReq AddressDataRequest
@@ -439,6 +454,47 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 				}
 			}
 		}
+		if r.URL.Path != principalPath {
+			aclBackend, ok := b.Backend.(AddressBookACLBackend)
+			if !ok {
+				return nil, internal.HTTPErrorf(http.StatusNotFound, "carddav: account principal unavailable")
+			}
+			if err := aclBackend.GetAddressBookAccountPrincipal(r.Context(), r.URL.Path); err != nil {
+				return nil, err
+			}
+			props := map[xml.Name]internal.PropFindFunc{
+				internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, internal.PrincipalName)),
+				xml.Name{Space: internal.Namespace, Local: "principal-URL"}: internal.PropFindValue(&struct {
+					XMLName xml.Name `xml:"DAV: principal-URL"`
+					Href    string   `xml:"DAV: href"`
+				}{Href: r.URL.Path}),
+			}
+			resp, err := internal.NewPropFindResponse(r.URL.Path, propfind, props)
+			if err != nil {
+				return nil, err
+			}
+			resps = append(resps, *resp)
+		}
+	case resourceTypeGroupPrincipal:
+		aclBackend, ok := b.Backend.(AddressBookACLBackend)
+		if !ok {
+			return nil, internal.HTTPErrorf(http.StatusNotFound, "carddav: group principal unavailable")
+		}
+		if err := aclBackend.GetAddressBookGroupPrincipal(r.Context(), r.URL.Path); err != nil {
+			return nil, err
+		}
+		props := map[xml.Name]internal.PropFindFunc{
+			internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.PrincipalName)),
+			xml.Name{Space: internal.Namespace, Local: "principal-URL"}: internal.PropFindValue(&struct {
+				XMLName xml.Name `xml:"DAV: principal-URL"`
+				Href    string   `xml:"DAV: href"`
+			}{Href: r.URL.Path}),
+		}
+		resp, err := internal.NewPropFindResponse(r.URL.Path, propfind, props)
+		if err != nil {
+			return nil, err
+		}
+		resps = append(resps, *resp)
 	case resourceTypeAddressBookHomeSet:
 		homeSetPath, err := b.Backend.AddressBookHomeSetPath(r.Context())
 		if err != nil {
@@ -565,13 +621,56 @@ func (b *backend) propFindAddressBook(ctx context.Context, propfind *internal.Pr
 				{ContentType: vcard.MIMEType, Version: "4.0"},
 			},
 		}),
-		// TODO: Gather UserPrivilege from backend to control read-and-write
-		internal.CurrentUserPrivilegeSetName: internal.PropFindValue(&internal.CurrentUserPrivilegeSet{
-			Privilege: []internal.Privilege{{
-				Read:  &struct{}{},
-				Write: &struct{}{},
-			}},
-		}),
+		internal.CurrentUserPrivilegeSetName: func(*internal.RawXMLValue) (interface{}, error) {
+			privileges := make([]internal.Privilege, 0, 6)
+			if ab.Read {
+				privileges = append(privileges, internal.Privilege{Read: &struct{}{}})
+			}
+			if ab.WriteContent {
+				privileges = append(privileges, internal.Privilege{WriteContent: &struct{}{}})
+			}
+			if ab.WriteProperties {
+				privileges = append(privileges, internal.Privilege{WriteProperties: &struct{}{}})
+			}
+			if ab.Bind {
+				privileges = append(privileges, internal.Privilege{Bind: &struct{}{}})
+			}
+			if ab.Unbind {
+				privileges = append(privileges, internal.Privilege{Unbind: &struct{}{}})
+			}
+			if aclBackend, ok := b.Backend.(AddressBookACLBackend); ok {
+				acl, err := aclBackend.GetAddressBookACL(ctx, ab.Path)
+				if err != nil {
+					return nil, err
+				}
+				if acl.CanWrite {
+					privileges = append(privileges, internal.Privilege{WriteACL: &struct{}{}})
+				}
+			}
+			return &internal.CurrentUserPrivilegeSet{Privilege: privileges}, nil
+		},
+	}
+	if aclBackend, ok := b.Backend.(AddressBookACLBackend); ok {
+		props[xml.Name{Space: internal.Namespace, Local: "acl-restrictions"}] = internal.PropFindValue(&internal.ACLRestrictions{GrantOnly: &struct{}{}, NoInvert: &struct{}{}})
+		props[xml.Name{Space: internal.Namespace, Local: "supported-privilege-set"}] = internal.PropFindValue(supportedAddressBookACLPrivileges())
+		props[xml.Name{Space: internal.Namespace, Local: "principal-collection-set"}] = internal.PropFindValue(&internal.PrincipalCollectionSet{Href: b.Prefix + "/"})
+		props[xml.Name{Space: internal.Namespace, Local: "acl"}] = func(*internal.RawXMLValue) (interface{}, error) {
+			acl, err := aclBackend.GetAddressBookACL(ctx, ab.Path)
+			if err != nil {
+				return nil, err
+			}
+			return internal.GrantACLProperty(acl), nil
+		}
+		props[xml.Name{Space: internal.Namespace, Local: "owner"}] = func(*internal.RawXMLValue) (interface{}, error) {
+			acl, err := aclBackend.GetAddressBookACL(ctx, ab.Path)
+			if err != nil {
+				return nil, err
+			}
+			return &struct {
+				XMLName xml.Name `xml:"DAV: owner"`
+				Href    string   `xml:"DAV: href"`
+			}{Href: acl.Owner}, nil
+		}
 	}
 	if syncBackend, ok := b.Backend.(AddressBookSyncBackend); ok {
 		props[xml.Name{Space: internal.Namespace, Local: "sync-token"}] = func(*internal.RawXMLValue) (interface{}, error) {
@@ -593,9 +692,13 @@ func (b *backend) propFindAddressBook(ctx context.Context, propfind *internal.Pr
 		})
 	}
 
-	if ab.Name != "" {
+	displayName := ab.DisplayName
+	if displayName == "" {
+		displayName = ab.Name
+	}
+	if displayName != "" {
 		props[internal.DisplayNameName] = internal.PropFindValue(&internal.DisplayName{
-			Name: ab.Name,
+			Name: displayName,
 		})
 	}
 	if ab.Description != "" {
@@ -698,42 +801,83 @@ func (b *backend) propFindAllAddressObjects(ctx context.Context, propfind *inter
 }
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {
-	homeSetPath, err := b.Backend.AddressBookHomeSetPath(r.Context())
-	if err != nil {
-		return nil, err
+	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeAddressBook {
+		return nil, internal.HTTPErrorf(http.StatusMethodNotAllowed, "carddav: only address book metadata can be changed")
 	}
-
-	resp := internal.NewOKResponse(r.URL.Path)
-
-	if r.URL.Path == homeSetPath {
-		// TODO: support PROPPATCH for address books
-		for _, prop := range update.Remove {
-			emptyVal := internal.NewRawXMLElement(prop.Prop.XMLName, nil, nil)
-			if err := resp.EncodeProp(http.StatusNotImplemented, emptyVal); err != nil {
-				return nil, err
-			}
+	propertyBackend, ok := b.Backend.(AddressBookPropertyBackend)
+	if !ok {
+		return nil, internal.HTTPErrorf(http.StatusNotImplemented, "carddav: PropPatch not implemented")
+	}
+	changes := make([]AddressBookPropertyUpdate, 0)
+	failed := make(map[xml.Name]int)
+	seen := make(map[xml.Name]bool)
+	appendChange := func(raw internal.RawXMLValue, remove bool) error {
+		name, ok := raw.XMLName()
+		if !ok {
+			return internal.HTTPErrorf(http.StatusBadRequest, "carddav: invalid property")
 		}
-		for _, prop := range update.Set {
-			emptyVal := internal.NewRawXMLElement(prop.Prop.XMLName, nil, nil)
-			if err := resp.EncodeProp(http.StatusNotImplemented, emptyVal); err != nil {
-				return nil, err
-			}
+		if seen[name] {
+			return internal.HTTPErrorf(http.StatusBadRequest, "carddav: property repeated in PROPPATCH")
 		}
-	} else {
-		for _, prop := range update.Remove {
-			emptyVal := internal.NewRawXMLElement(prop.Prop.XMLName, nil, nil)
-			if err := resp.EncodeProp(http.StatusMethodNotAllowed, emptyVal); err != nil {
-				return nil, err
-			}
+		seen[name] = true
+		if name != internal.DisplayNameName && name != addressBookDescriptionName {
+			failed[name] = http.StatusForbidden
+			return nil
 		}
-		for _, prop := range update.Set {
-			emptyVal := internal.NewRawXMLElement(prop.Prop.XMLName, nil, nil)
-			if err := resp.EncodeProp(http.StatusMethodNotAllowed, emptyVal); err != nil {
+		change := AddressBookPropertyUpdate{Name: name, Remove: remove}
+		if !remove {
+			var value struct {
+				Text  string `xml:",chardata"`
+				Inner string `xml:",innerxml"`
+			}
+			if err := raw.Decode(&value); err != nil {
+				return internal.HTTPErrorf(http.StatusBadRequest, "carddav: invalid property value: %v", err)
+			}
+			if strings.Contains(value.Inner, "<") {
+				return internal.HTTPErrorf(http.StatusBadRequest, "carddav: address book property requires text")
+			}
+			change.Value = value.Text
+		}
+		changes = append(changes, change)
+		return nil
+	}
+	for _, group := range update.Remove {
+		for _, raw := range group.Prop.Raw {
+			if err := appendChange(raw, true); err != nil {
 				return nil, err
 			}
 		}
 	}
-
+	for _, group := range update.Set {
+		for _, raw := range group.Prop.Raw {
+			if err := appendChange(raw, false); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil, internal.HTTPErrorf(http.StatusBadRequest, "carddav: empty PROPPATCH")
+	}
+	if len(failed) == 0 {
+		if err := propertyBackend.PatchAddressBookProperties(r.Context(), r.URL.Path, changes); err != nil {
+			code := internal.HTTPErrorFromError(err).Code
+			for name := range seen {
+				failed[name] = code
+			}
+		}
+	}
+	resp := &internal.Response{Hrefs: []internal.Href{{Path: r.URL.Path}}}
+	for name := range seen {
+		code := http.StatusOK
+		if failed[name] != 0 {
+			code = failed[name]
+		} else if len(failed) != 0 {
+			code = http.StatusFailedDependency
+		}
+		if err := resp.EncodeProp(code, internal.NewRawXMLElement(name, nil, nil)); err != nil {
+			return nil, err
+		}
+	}
 	return resp, nil
 }
 
@@ -811,7 +955,7 @@ func (b *backend) Mkcol(r *http.Request) error {
 		if !m.ResourceType.Is(internal.CollectionName) || !m.ResourceType.Is(addressBookName) {
 			return internal.HTTPErrorf(http.StatusBadRequest, "carddav: unexpected resource type")
 		}
-		ab.Name = m.DisplayName
+		ab.DisplayName = m.DisplayName
 		ab.Description = m.Description.Description
 		// TODO ...
 	}
