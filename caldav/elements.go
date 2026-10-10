@@ -226,6 +226,7 @@ type reportReq struct {
 	Multiget *calendarMultiget
 	FreeBusy *freeBusyQuery
 	Sync     *internal.SyncCollectionQuery
+	ACL      *internal.ACLReportQuery
 }
 
 type syncTokenProperty struct {
@@ -247,6 +248,11 @@ type supportedSyncReportName struct {
 	CalendarQuery    *struct{} `xml:"urn:ietf:params:xml:ns:caldav calendar-query,omitempty"`
 	CalendarMultiget *struct{} `xml:"urn:ietf:params:xml:ns:caldav calendar-multiget,omitempty"`
 	FreeBusyQuery    *struct{} `xml:"urn:ietf:params:xml:ns:caldav free-busy-query,omitempty"`
+	ACLPrincipals    *struct{} `xml:"DAV: acl-principal-prop-set,omitempty"`
+	PrincipalMatch   *struct{} `xml:"DAV: principal-match,omitempty"`
+	PrincipalSearch  *struct{} `xml:"DAV: principal-property-search,omitempty"`
+	SearchProperties *struct{} `xml:"DAV: principal-search-property-set,omitempty"`
+	ExpandProperty   *struct{} `xml:"DAV: expand-property,omitempty"`
 }
 
 type freeBusyQuery struct {
@@ -270,7 +276,11 @@ func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 		r.Sync = &internal.SyncCollectionQuery{}
 		v = r.Sync
 	default:
-		return fmt.Errorf("caldav: unsupported REPORT root %q %q", start.Name.Space, start.Name.Local)
+		if !internal.IsACLReport(start.Name) {
+			return fmt.Errorf("caldav: unsupported REPORT root %q %q", start.Name.Space, start.Name.Local)
+		}
+		r.ACL = &internal.ACLReportQuery{}
+		v = r.ACL
 	}
 
 	return d.DecodeElement(v, &start)

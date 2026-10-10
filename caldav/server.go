@@ -158,6 +158,8 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 		return h.handleMultiget(r.Context(), w, report.Multiget)
 	} else if report.Sync != nil {
 		return h.handleSync(r, w, report.Sync)
+	} else if report.ACL != nil {
+		return h.handleACLReport(w, r, report.ACL)
 	} else if report.FreeBusy != nil {
 		if len(report.FreeBusy.TimeRanges) != 1 {
 			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: free-busy-query requires one time-range")
@@ -607,6 +609,15 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 					Href    string   `xml:"DAV: href"`
 				}{Href: r.URL.Path}),
 			}
+			if directory, ok := b.Backend.(webdav.DAVPrincipalBackend); ok {
+				info, err := directory.DAVPrincipal(r.Context(), r.URL.Path)
+				if err != nil {
+					return nil, err
+				}
+				for name, property := range internal.PrincipalProperties(r.URL.Path, info.DisplayName, info.Members, info.Memberships) {
+					props[name] = property
+				}
+			}
 			resp, err := internal.NewPropFindResponse(r.URL.Path, propfind, props)
 			if err != nil {
 				return nil, err
@@ -627,6 +638,15 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 				XMLName xml.Name `xml:"DAV: principal-URL"`
 				Href    string   `xml:"DAV: href"`
 			}{Href: r.URL.Path}),
+		}
+		if directory, ok := b.Backend.(webdav.DAVPrincipalBackend); ok {
+			info, err := directory.DAVPrincipal(r.Context(), r.URL.Path)
+			if err != nil {
+				return nil, err
+			}
+			for name, property := range internal.PrincipalProperties(r.URL.Path, info.DisplayName, info.Members, info.Memberships) {
+				props[name] = property
+			}
 		}
 		resp, err := internal.NewPropFindResponse(r.URL.Path, propfind, props)
 		if err != nil {
@@ -723,6 +743,15 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 			Href: internal.Href{Path: homeSetPath},
 		}),
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, internal.PrincipalName)),
+	}
+	if directory, ok := b.Backend.(webdav.DAVPrincipalBackend); ok {
+		info, err := directory.DAVPrincipal(ctx, requestedPath)
+		if err != nil {
+			return nil, err
+		}
+		for name, property := range internal.PrincipalProperties(requestedPath, info.DisplayName, info.Members, info.Memberships) {
+			props[name] = property
+		}
 	}
 	return internal.NewPropFindResponse(requestedPath, propfind, props)
 }
@@ -862,13 +891,22 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 			}
 			return &syncTokenProperty{Value: token}, nil
 		}
+		reports := []supportedSyncReport{
+			{Report: supportedSyncReportName{SyncCollection: &struct{}{}}},
+			{Report: supportedSyncReportName{CalendarQuery: &struct{}{}}},
+			{Report: supportedSyncReportName{CalendarMultiget: &struct{}{}}},
+			{Report: supportedSyncReportName{FreeBusyQuery: &struct{}{}}},
+		}
+		if _, ok := b.Backend.(webdav.DAVPrincipalBackend); ok {
+			reports = append(reports,
+				supportedSyncReport{Report: supportedSyncReportName{ACLPrincipals: &struct{}{}}},
+				supportedSyncReport{Report: supportedSyncReportName{PrincipalMatch: &struct{}{}}},
+				supportedSyncReport{Report: supportedSyncReportName{PrincipalSearch: &struct{}{}}},
+				supportedSyncReport{Report: supportedSyncReportName{SearchProperties: &struct{}{}}},
+				supportedSyncReport{Report: supportedSyncReportName{ExpandProperty: &struct{}{}}})
+		}
 		props[xml.Name{Space: internal.Namespace, Local: "supported-report-set"}] = internal.PropFindValue(
-			&supportedSyncReports{Reports: []supportedSyncReport{
-				{Report: supportedSyncReportName{SyncCollection: &struct{}{}}},
-				{Report: supportedSyncReportName{CalendarQuery: &struct{}{}}},
-				{Report: supportedSyncReportName{CalendarMultiget: &struct{}{}}},
-				{Report: supportedSyncReportName{FreeBusyQuery: &struct{}{}}},
-			}})
+			&supportedSyncReports{Reports: reports})
 	}
 
 	// TODO: CALDAV:calendar-timezone, CALDAV:supported-calendar-component-set, CALDAV:min-date-time, CALDAV:max-date-time, CALDAV:max-instances, CALDAV:max-attendees-per-instance

@@ -9,6 +9,12 @@ import (
 	"strings"
 )
 
+func ACLPreconditionError(name string) error {
+	return &HTTPError{Code: http.StatusForbidden, Err: &Error{Raw: []RawXMLValue{
+		*NewRawXMLElement(xml.Name{Space: Namespace, Local: name}, nil, nil),
+	}}}
+}
+
 // GrantACLEntry is one editable or protected, non-inherited grant ACE.
 type GrantACLEntry struct {
 	Principal  string
@@ -72,9 +78,17 @@ func ParseGrantACL(r *http.Request) ([]GrantACLEntry, error) {
 	}
 	entries := make([]GrantACLEntry, 0, len(request.ACE))
 	for _, ace := range request.ACE {
-		if len(ace.Principal.Href) != 1 || ace.Principal.Href[0] == "" || len(ace.Principal.Other) != 0 || ace.Grant == nil ||
-			len(ace.Grant.Other) != 0 || len(ace.Other) != 0 || ace.Deny != nil || ace.Inherited != nil || len(ace.Grant.Privileges) == 0 {
-			return nil, HTTPErrorf(http.StatusForbidden, "DAV: unsupported ACE")
+		if ace.Deny != nil {
+			return nil, ACLPreconditionError("grant-only")
+		}
+		if ace.Inherited != nil {
+			return nil, ACLPreconditionError("no-inherited-ace-conflict")
+		}
+		if len(ace.Principal.Href) != 1 || ace.Principal.Href[0] == "" || len(ace.Principal.Other) != 0 {
+			return nil, ACLPreconditionError("allowed-principal")
+		}
+		if ace.Grant == nil || len(ace.Grant.Other) != 0 || len(ace.Other) != 0 || len(ace.Grant.Privileges) == 0 {
+			return nil, ACLPreconditionError("no-ace-conflict")
 		}
 		href := ace.Principal.Href[0]
 		parsed, err := url.Parse(href)
@@ -83,7 +97,7 @@ func ParseGrantACL(r *http.Request) ([]GrantACLEntry, error) {
 		}
 		if parsed.IsAbs() {
 			if parsed.Scheme != "http" && parsed.Scheme != "https" || !strings.EqualFold(parsed.Host, r.Host) {
-				return nil, HTTPErrorf(http.StatusForbidden, "DAV: ACL principal is outside this server")
+				return nil, ACLPreconditionError("allowed-principal")
 			}
 			href = parsed.Path
 		}
@@ -141,6 +155,22 @@ type PrincipalCollectionSet struct {
 	Href    string   `xml:"DAV: href"`
 }
 
+type PrincipalHrefSet struct {
+	XMLName xml.Name
+	Hrefs   []string `xml:"DAV: href"`
+}
+
+func PrincipalProperties(path, displayName string, members, memberships []string) map[xml.Name]PropFindFunc {
+	name := func(local string) xml.Name { return xml.Name{Space: Namespace, Local: local} }
+	return map[xml.Name]PropFindFunc{
+		DisplayNameName:           PropFindValue(&DisplayName{Name: displayName}),
+		name("principal-URL"):     PropFindValue(&PrincipalHrefSet{XMLName: name("principal-URL"), Hrefs: []string{path}}),
+		name("alternate-URI-set"): PropFindValue(&PrincipalHrefSet{XMLName: name("alternate-URI-set")}),
+		name("group-member-set"):  PropFindValue(&PrincipalHrefSet{XMLName: name("group-member-set"), Hrefs: members}),
+		name("group-membership"):  PropFindValue(&PrincipalHrefSet{XMLName: name("group-membership"), Hrefs: memberships}),
+	}
+}
+
 type SupportedPrivilegeSet struct {
 	XMLName    xml.Name             `xml:"DAV: supported-privilege-set"`
 	Privileges []SupportedPrivilege `xml:"DAV: supported-privilege"`
@@ -166,8 +196,27 @@ func aclPrivilegeDescription(name xml.Name) ACLPrivilegeDescription {
 func SupportedACLPrivileges(names []xml.Name) *SupportedPrivilegeSet {
 	allName := xml.Name{Space: Namespace, Local: "all"}
 	all := SupportedPrivilege{Privilege: aclPrivilegeXML{Names: []aclPrivilegeName{{XMLName: allName}}}, Abstract: &struct{}{}, Description: aclPrivilegeDescription(allName)}
+	writeName := xml.Name{Space: Namespace, Local: "write"}
+	write := SupportedPrivilege{Privilege: aclPrivilegeXML{Names: []aclPrivilegeName{{XMLName: writeName}}}, Abstract: &struct{}{}, Description: aclPrivilegeDescription(writeName)}
 	for _, name := range names {
-		all.Children = append(all.Children, SupportedPrivilege{Privilege: aclPrivilegeXML{Names: []aclPrivilegeName{{XMLName: name}}}, Description: aclPrivilegeDescription(name)})
+		privilege := SupportedPrivilege{Privilege: aclPrivilegeXML{Names: []aclPrivilegeName{{XMLName: name}}}, Description: aclPrivilegeDescription(name)}
+		switch name {
+		case (xml.Name{Space: Namespace, Local: "read"}):
+			for _, local := range []string{"read-acl", "read-current-user-privilege-set"} {
+				childName := xml.Name{Space: Namespace, Local: local}
+				privilege.Children = append(privilege.Children, SupportedPrivilege{Privilege: aclPrivilegeXML{Names: []aclPrivilegeName{{XMLName: childName}}},
+					Abstract: &struct{}{}, Description: aclPrivilegeDescription(childName)})
+			}
+			all.Children = append(all.Children, privilege)
+		case (xml.Name{Space: Namespace, Local: "write-content"}), (xml.Name{Space: Namespace, Local: "write-properties"}),
+			(xml.Name{Space: Namespace, Local: "bind"}), (xml.Name{Space: Namespace, Local: "unbind"}):
+			write.Children = append(write.Children, privilege)
+		default:
+			all.Children = append(all.Children, privilege)
+		}
+	}
+	if len(write.Children) != 0 {
+		all.Children = append(all.Children, write)
 	}
 	return &SupportedPrivilegeSet{Privileges: []SupportedPrivilege{all}}
 }

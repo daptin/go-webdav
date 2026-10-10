@@ -195,6 +195,7 @@ type reportReq struct {
 	Query    *addressbookQuery
 	Multiget *addressbookMultiget
 	Sync     *internal.SyncCollectionQuery
+	ACL      *internal.ACLReportQuery
 }
 
 func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
@@ -210,7 +211,11 @@ func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 		r.Sync = &internal.SyncCollectionQuery{}
 		v = r.Sync
 	default:
-		return fmt.Errorf("carddav: unsupported REPORT root %q %q", start.Name.Space, start.Name.Local)
+		if !internal.IsACLReport(start.Name) {
+			return fmt.Errorf("carddav: unsupported REPORT root %q %q", start.Name.Space, start.Name.Local)
+		}
+		r.ACL = &internal.ACLReportQuery{}
+		v = r.ACL
 	}
 
 	return d.DecodeElement(v, &start)
@@ -229,6 +234,11 @@ type supportedSyncReportName struct {
 	SyncCollection   *struct{} `xml:"DAV: sync-collection,omitempty"`
 	AddressBookQuery *struct{} `xml:"urn:ietf:params:xml:ns:carddav addressbook-query,omitempty"`
 	AddressBookMulti *struct{} `xml:"urn:ietf:params:xml:ns:carddav addressbook-multiget,omitempty"`
+	ACLPrincipals    *struct{} `xml:"DAV: acl-principal-prop-set,omitempty"`
+	PrincipalMatch   *struct{} `xml:"DAV: principal-match,omitempty"`
+	PrincipalSearch  *struct{} `xml:"DAV: principal-property-search,omitempty"`
+	SearchProperties *struct{} `xml:"DAV: principal-search-property-set,omitempty"`
+	ExpandProperty   *struct{} `xml:"DAV: expand-property,omitempty"`
 }
 
 type mkcolReq struct {

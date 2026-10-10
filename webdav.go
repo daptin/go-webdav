@@ -4,10 +4,26 @@
 package webdav
 
 import (
+	"context"
 	"time"
 
 	"github.com/daptin/go-webdav/internal"
 )
+
+// DAVPrincipal describes an application principal exposed by a DAV adapter.
+type DAVPrincipal struct {
+	Path        string
+	DisplayName string
+	Members     []string
+	Memberships []string
+}
+
+// DAVPrincipalBackend resolves principals through the application's identity
+// and permission authority. Search returns only principals visible to caller.
+type DAVPrincipalBackend interface {
+	DAVPrincipal(context.Context, string) (*DAVPrincipal, error)
+	SearchDAVPrincipals(context.Context, string, string, int) ([]DAVPrincipal, error)
+}
 
 // FileInfo holds information about a WebDAV file.
 type FileInfo struct {

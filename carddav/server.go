@@ -99,6 +99,8 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 		return h.handleMultiget(r.Context(), w, report.Multiget)
 	} else if report.Sync != nil {
 		return h.handleSync(r, w, report.Sync)
+	} else if report.ACL != nil {
+		return h.handleACLReport(w, r, report.ACL)
 	}
 	return internal.HTTPErrorf(http.StatusBadRequest, "carddav: unsupported REPORT request")
 }
@@ -469,6 +471,15 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 					Href    string   `xml:"DAV: href"`
 				}{Href: r.URL.Path}),
 			}
+			if directory, ok := b.Backend.(webdav.DAVPrincipalBackend); ok {
+				info, err := directory.DAVPrincipal(r.Context(), r.URL.Path)
+				if err != nil {
+					return nil, err
+				}
+				for name, property := range internal.PrincipalProperties(r.URL.Path, info.DisplayName, info.Members, info.Memberships) {
+					props[name] = property
+				}
+			}
 			resp, err := internal.NewPropFindResponse(r.URL.Path, propfind, props)
 			if err != nil {
 				return nil, err
@@ -489,6 +500,15 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 				XMLName xml.Name `xml:"DAV: principal-URL"`
 				Href    string   `xml:"DAV: href"`
 			}{Href: r.URL.Path}),
+		}
+		if directory, ok := b.Backend.(webdav.DAVPrincipalBackend); ok {
+			info, err := directory.DAVPrincipal(r.Context(), r.URL.Path)
+			if err != nil {
+				return nil, err
+			}
+			for name, property := range internal.PrincipalProperties(r.URL.Path, info.DisplayName, info.Members, info.Memberships) {
+				props[name] = property
+			}
 		}
 		resp, err := internal.NewPropFindResponse(r.URL.Path, propfind, props)
 		if err != nil {
@@ -581,6 +601,15 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 			return &addressbookHomeSet{Href: internal.Href{Path: homeSetPath}}, nil
 		},
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, internal.PrincipalName)),
+	}
+	if directory, ok := b.Backend.(webdav.DAVPrincipalBackend); ok {
+		info, err := directory.DAVPrincipal(ctx, principalPath)
+		if err != nil {
+			return nil, err
+		}
+		for name, property := range internal.PrincipalProperties(principalPath, info.DisplayName, info.Members, info.Memberships) {
+			props[name] = property
+		}
 	}
 	return internal.NewPropFindResponse(principalPath, propfind, props)
 }
@@ -683,13 +712,20 @@ func (b *backend) propFindAddressBook(ctx context.Context, propfind *internal.Pr
 				Value   string   `xml:",chardata"`
 			}{Value: token}, nil
 		}
-		props[xml.Name{Space: internal.Namespace, Local: "supported-report-set"}] = internal.PropFindValue(&supportedSyncReports{
-			Reports: []supportedSyncReport{
-				{Report: supportedSyncReportName{SyncCollection: &struct{}{}}},
-				{Report: supportedSyncReportName{AddressBookQuery: &struct{}{}}},
-				{Report: supportedSyncReportName{AddressBookMulti: &struct{}{}}},
-			},
-		})
+		reports := []supportedSyncReport{
+			{Report: supportedSyncReportName{SyncCollection: &struct{}{}}},
+			{Report: supportedSyncReportName{AddressBookQuery: &struct{}{}}},
+			{Report: supportedSyncReportName{AddressBookMulti: &struct{}{}}},
+		}
+		if _, ok := b.Backend.(webdav.DAVPrincipalBackend); ok {
+			reports = append(reports,
+				supportedSyncReport{Report: supportedSyncReportName{ACLPrincipals: &struct{}{}}},
+				supportedSyncReport{Report: supportedSyncReportName{PrincipalMatch: &struct{}{}}},
+				supportedSyncReport{Report: supportedSyncReportName{PrincipalSearch: &struct{}{}}},
+				supportedSyncReport{Report: supportedSyncReportName{SearchProperties: &struct{}{}}},
+				supportedSyncReport{Report: supportedSyncReportName{ExpandProperty: &struct{}{}}})
+		}
+		props[xml.Name{Space: internal.Namespace, Local: "supported-report-set"}] = internal.PropFindValue(&supportedSyncReports{Reports: reports})
 	}
 
 	displayName := ab.DisplayName
