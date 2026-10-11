@@ -50,6 +50,15 @@ func TestCalendarSyncReportAndProperties(t *testing.T) {
 		t.Fatalf("sync REPORT status=%d body=%s", response.Code, response.Body.String())
 	}
 	request = httptest.NewRequest("REPORT", "http://example.test/caldav/owner/calendars/team/", strings.NewReader(
+		`<D:sync-collection xmlns:D="DAV:"><D:sync-token/><D:sync-level>1</D:sync-level><D:limit><D:nresults>1</D:nresults></D:limit><D:prop><D:getetag/></D:prop></D:sync-collection>`))
+	request.Header.Set("Depth", "1")
+	request.Header.Set("Content-Type", "application/xml")
+	response = httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusMultiStatus || !strings.Contains(response.Body.String(), "one.ics") {
+		t.Fatalf("Apple-style sync REPORT status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest("REPORT", "http://example.test/caldav/owner/calendars/team/", strings.NewReader(
 		`<D:sync-collection xmlns:D="DAV:"><D:sync-token>invalid</D:sync-token><D:sync-level>1</D:sync-level><D:prop><D:getetag/></D:prop></D:sync-collection>`))
 	request.Header.Set("Content-Type", "application/xml")
 	response = httptest.NewRecorder()

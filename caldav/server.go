@@ -203,7 +203,9 @@ func (h *Handler) handleSync(r *http.Request, w http.ResponseWriter, query *inte
 	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendar {
 		return internal.HTTPErrorf(http.StatusForbidden, "caldav: sync requires a calendar collection")
 	}
-	if depth := r.Header.Get("Depth"); depth != "" && depth != "0" {
+	// Apple Calendar sends Depth: 1 for sync-collection even though the
+	// sync-level element, rather than this header, selects member depth.
+	if depth := r.Header.Get("Depth"); depth != "" && depth != "0" && depth != "1" {
 		return internal.HTTPErrorf(http.StatusBadRequest, "caldav: sync requires Depth: 0")
 	}
 	backend, ok := h.Backend.(CalendarSyncBackend)
