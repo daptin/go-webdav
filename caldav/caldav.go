@@ -71,6 +71,7 @@ type Calendar struct {
 	Name                  string
 	DisplayName           string
 	Description           string
+	Color                 string
 	MaxResourceSize       int64
 	SupportedComponentSet []string
 	Read                  bool

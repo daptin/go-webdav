@@ -44,12 +44,12 @@ func (b *mutationBackend) MoveCalendarCollection(_ context.Context, source, dest
 func TestCalendarMutationMethods(t *testing.T) {
 	b := &mutationBackend{testBackend: testBackend{calendars: []Calendar{{Path: "/caldav/owner/calendars/team/"}}}}
 	h := Handler{Backend: b, Prefix: "/caldav"}
-	patch := `<D:propertyupdate xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"><D:set><D:prop><D:displayname>Team</D:displayname><C:calendar-description>Notes</C:calendar-description></D:prop></D:set></D:propertyupdate>`
+	patch := `<D:propertyupdate xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:A="http://apple.com/ns/ical/"><D:set><D:prop><D:displayname>Team</D:displayname><C:calendar-description>Notes</C:calendar-description><A:calendar-color>#127ACD</A:calendar-color></D:prop></D:set></D:propertyupdate>`
 	request := httptest.NewRequest("PROPPATCH", "http://example.test/caldav/owner/calendars/team/", strings.NewReader(patch))
 	request.Header.Set("Content-Type", "application/xml")
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, request)
-	if response.Code != http.StatusMultiStatus || len(b.properties) != 2 {
+	if response.Code != http.StatusMultiStatus || len(b.properties) != 3 || b.properties[2].Name != calendarColorName || b.properties[2].Value != "#127ACD" {
 		t.Fatalf("PROPPATCH status=%d properties=%#v body=%s", response.Code, b.properties, response.Body.String())
 	}
 	request = httptest.NewRequest("COPY", "http://example.test/caldav/owner/calendars/team/one.ics", nil)

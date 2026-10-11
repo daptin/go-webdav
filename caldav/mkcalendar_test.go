@@ -23,12 +23,12 @@ func TestMkcalendarCreatesWithPropertiesAtomically(t *testing.T) {
 	b := &mkcalendarBackend{}
 	h := Handler{Backend: b, Prefix: "/caldav"}
 	request := httptest.NewRequest("MKCALENDAR", "/caldav/owner/calendars/new/",
-		strings.NewReader(`<C:mkcalendar xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:"><D:set><D:prop><D:displayname>Planning</D:displayname><C:calendar-description>Team calendar</C:calendar-description></D:prop></D:set></C:mkcalendar>`))
+		strings.NewReader(`<C:mkcalendar xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:D="DAV:" xmlns:A="http://apple.com/ns/ical/"><D:set><D:prop><D:displayname>Planning</D:displayname><C:calendar-description>Team calendar</C:calendar-description><A:calendar-color>#127ACD</A:calendar-color></D:prop></D:set></C:mkcalendar>`))
 	request.Header.Set("Content-Type", "application/xml")
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, request)
 	if response.Code != http.StatusCreated || len(b.created) != 1 ||
-		b.created[0].DisplayName != "Planning" || b.created[0].Description != "Team calendar" {
+		b.created[0].DisplayName != "Planning" || b.created[0].Description != "Team calendar" || b.created[0].Color != "#127ACD" {
 		t.Fatalf("status=%d created=%+v body=%s", response.Code, b.created, response.Body.String())
 	}
 	if response.Header().Get("Cache-Control") != "no-cache" {

@@ -133,6 +133,11 @@ func (h *Handler) handleMkcalendar(w http.ResponseWriter, r *http.Request) error
 				cal.DisplayName = value.Text
 			case calendarDescriptionName:
 				cal.Description = value.Text
+			case calendarColorName:
+				if value.Text == "" {
+					return internal.HTTPErrorf(http.StatusBadRequest, "caldav: empty calendar color")
+				}
+				cal.Color = value.Text
 			default:
 				return internal.HTTPErrorf(http.StatusForbidden, "caldav: unsupported calendar property")
 			}
@@ -861,6 +866,9 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 			return &internal.CurrentUserPrivilegeSet{Privilege: privileges}, nil
 		},
 	}
+	if cal.Color != "" {
+		props[calendarColorName] = internal.PropFindValue(&calendarColor{Color: cal.Color})
+	}
 	if aclBackend, ok := b.Backend.(CalendarACLBackend); ok {
 		props[xml.Name{Space: internal.Namespace, Local: "acl-restrictions"}] = internal.PropFindValue(&aclRestrictionsXML{
 			GrantOnly: &struct{}{}, NoInvert: &struct{}{},
@@ -1048,7 +1056,7 @@ func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*
 			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: property repeated in PROPPATCH")
 		}
 		seen[name] = true
-		if name != internal.DisplayNameName && name != calendarDescriptionName {
+		if name != internal.DisplayNameName && name != calendarDescriptionName && name != calendarColorName {
 			failed[name] = http.StatusForbidden
 			return nil
 		}

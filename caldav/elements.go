@@ -14,6 +14,7 @@ var (
 	calendarHomeSetName = xml.Name{namespace, "calendar-home-set"}
 
 	calendarDescriptionName           = xml.Name{namespace, "calendar-description"}
+	calendarColorName                 = xml.Name{"http://apple.com/ns/ical/", "calendar-color"}
 	supportedCalendarDataName         = xml.Name{namespace, "supported-calendar-data"}
 	supportedCalendarComponentSetName = xml.Name{namespace, "supported-calendar-component-set"}
 	supportedCollationSetName         = xml.Name{namespace, "supported-collation-set"}
@@ -47,6 +48,11 @@ func (a *calendarHomeSet) GetXMLName() xml.Name {
 type calendarDescription struct {
 	XMLName     xml.Name `xml:"urn:ietf:params:xml:ns:caldav calendar-description"`
 	Description string   `xml:",chardata"`
+}
+
+type calendarColor struct {
+	XMLName xml.Name `xml:"http://apple.com/ns/ical/ calendar-color"`
+	Color   string   `xml:",chardata"`
 }
 
 // https://tools.ietf.org/html/rfc4791#section-5.2.4

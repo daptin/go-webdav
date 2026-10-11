@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/emersion/go-ical"
 	"github.com/daptin/go-webdav"
 	"github.com/daptin/go-webdav/internal"
+	"github.com/emersion/go-ical"
 )
 
 // DiscoverContextURL performs a DNS-based CardDAV service discovery as
@@ -61,6 +61,7 @@ func (c *Client) FindCalendars(ctx context.Context, calendarHomeSet string) ([]C
 		internal.ResourceTypeName,
 		internal.DisplayNameName,
 		calendarDescriptionName,
+		calendarColorName,
 		maxResourceSizeName,
 		supportedCalendarComponentSetName,
 	)
@@ -86,6 +87,10 @@ func (c *Client) FindCalendars(ctx context.Context, calendarHomeSet string) ([]C
 
 		var desc calendarDescription
 		if err := resp.DecodeProp(&desc); err != nil && !internal.IsNotFound(err) {
+			return nil, err
+		}
+		var color calendarColor
+		if err := resp.DecodeProp(&color); err != nil && !internal.IsNotFound(err) {
 			return nil, err
 		}
 
@@ -116,6 +121,7 @@ func (c *Client) FindCalendars(ctx context.Context, calendarHomeSet string) ([]C
 			Path:                  path,
 			Name:                  dispName.Name,
 			Description:           desc.Description,
+			Color:                 color.Color,
 			MaxResourceSize:       maxResSize.Size,
 			SupportedComponentSet: compNames,
 		})
